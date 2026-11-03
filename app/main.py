@@ -6,43 +6,35 @@
 - 支持文本/图片/视频/音频/文件等全类型媒体
 - Bearer Token 鉴权
 - OpenAI 兼容接口（/v1/chat/completions）
-- name 字段透传：进站时记录，出站轮询时可指定发往哪个 name
+- SSE 实时推流（GET /stream/{name}）
 """
 
 import asyncio
-import hashlib
-import hmac
 import json
 import os
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import AsyncGenerator, Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Query, Path as FastAPIPath, Request
+from fastapi import FastAPI, UploadFile, HTTPException, Header, Query, Path as FastAPIPath, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 # ─── 配置 ───────────────────────────────────────────────────────────────────
 
 BASE_DIR = Path(__file__).parent
-# 存储目录优先用环境变量，默认 /app/storage（容器挂载点）
 STORAGE_DIR = Path(os.getenv("WEBHOOK_STORAGE_DIR", "/app/storage"))
 if not STORAGE_DIR.exists():
     STORAGE_DIR = BASE_DIR / "storage"
 UPLOADS_DIR = STORAGE_DIR / "uploads"
 DB_PATH = STORAGE_DIR / "webhook.db"
 
-# 默认鉴权 key（通过环境变量 WEBHOOK_API_KEY 覆盖）
-API_KEY = os.getenv("WEBHOOK_API_KEY", "webhook-default-key-change-me")
-
-# 入站轮询间隔（秒）
+API_KEY = os.getenv("WEBHOOK_API_KEY", "")
 POLL_INTERVAL = int(os.getenv("WEBHOOK_POLL_INTERVAL", "2"))
-
-# 消息保留天数
 MESSAGE_RETENTION_DAYS = int(os.getenv("WEBHOOK_MSG_RETENTION", "7"))
+MAX_UPLOAD_SIZE = int(os.getenv("WEBHOOK_MAX_UPLOAD_MB", "50")) * 1024 * 1024  # 默认 50MB
 
 # ─── 目录初始化 ─────────────────────────────────────────────────────────────
 
@@ -53,20 +45,20 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 # ─── SQLite 数据库 ──────────────────────────────────────────────────────────
 
 def _get_db() -> sqlite3.Connection:
-    """获取数据库连接"""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
 def _init_db():
-    """初始化数据库表"""
     conn = _get_db()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
+            request_id TEXT,
             type TEXT NOT NULL,
             content TEXT,
             media_url TEXT,
@@ -79,6 +71,7 @@ def _init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_name ON messages(name)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_direction ON messages(direction)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_request_id ON messages(request_id)")
     conn.commit()
     conn.close()
 
@@ -90,41 +83,40 @@ _init_db()
 
 class Message(BaseModel):
     id: str
-    type: str  # text | image | video | audio | file
-    content: Optional[str] = None          # 文本内容 / URL
-    media_url: Optional[str] = None        # 媒体文件访问路径
-    name: Optional[str] = None             # 发送者/接收者标识
-    direction: str = "inbound"           # inbound | outbound
+    request_id: Optional[str] = None
+    type: str
+    content: Optional[str] = None
+    media_url: Optional[str] = None
+    name: Optional[str] = None
+    direction: str = "inbound"
     timestamp: float
     metadata: dict = {}
 
 
-class WebhookInbound(BaseModel):
-    """入站消息体"""
-    name: Optional[str] = None            # 发送方标识
-    type: str = "text"                    # text | image | video | audio | file
-    content: Optional[str] = None         # 文本内容
-    url: Optional[str] = None             # 媒体 URL（type=media 时）
-    caption: Optional[str] = None         # 图片/视频描述文字
-
-
-class WebhookOutbound(BaseModel):
-    """出站消息体"""
-    name: str                              # 目标接收方
+class WebhookPayload(BaseModel):
     type: str = "text"
-    content: str
+    content: Optional[str] = None
+    caption: Optional[str] = None
     media_url: Optional[str] = None
+    metadata: dict = {}
 
 
 class ChatMessage(BaseModel):
-    role: str   # user | assistant
+    role: str
     content: str
 
 
 class ChatCompletionRequest(BaseModel):
     model: str = "webhook"
     messages: list[ChatMessage]
-    name: Optional[str] = None          # 指定会话名
+    name: Optional[str] = None
+    request_id: Optional[str] = None
+
+
+class ChatCompletionChoice(BaseModel):
+    index: int
+    message: dict
+    finish_reason: str = "stop"
 
 
 class ChatCompletionResponse(BaseModel):
@@ -132,25 +124,22 @@ class ChatCompletionResponse(BaseModel):
     object: str = "chat.completion"
     created: int
     model: str
-    choices: list[dict]
-    usage: dict
+    choices: list[ChatCompletionChoice]
+    usage: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
 # ─── 工具函数 ───────────────────────────────────────────────────────────────
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _save_message(msg: Message) -> str:
-    """持久化消息到 SQLite"""
     mid = msg.id or str(uuid.uuid4())
     msg.id = mid
     conn = _get_db()
     conn.execute(
-        """INSERT OR REPLACE INTO messages (id, type, content, media_url, name, direction, timestamp, metadata)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (mid, msg.type, msg.content, msg.media_url, msg.name, msg.direction, msg.timestamp,
+        """INSERT OR REPLACE INTO messages
+           (id, request_id, type, content, media_url, name, direction, timestamp, metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (mid, msg.request_id, msg.type, msg.content, msg.media_url,
+         msg.name, msg.direction, msg.timestamp,
          json.dumps(msg.metadata, ensure_ascii=False) if msg.metadata else None)
     )
     conn.commit()
@@ -158,43 +147,39 @@ def _save_message(msg: Message) -> str:
     return mid
 
 
-def _load_message(mid: str) -> Optional[Message]:
+def _list_messages(name: Optional[str] = None, limit: int = 50,
+                   direction: Optional[str] = None,
+                   since: Optional[float] = None,
+                   request_id: Optional[str] = None) -> list[Message]:
     conn = _get_db()
-    row = conn.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
-    conn.close()
-    if not row:
-        return None
-    return Message(
-        id=row["id"],
-        type=row["type"],
-        content=row["content"],
-        media_url=row["media_url"],
-        name=row["name"],
-        direction=row["direction"],
-        timestamp=row["timestamp"],
-        metadata=json.loads(row["metadata"]) if row["metadata"] else {},
-    )
+    conditions = []
+    params = []
 
-
-def _list_messages(name: Optional[str] = None, limit: int = 50) -> list[Message]:
-    """列出消息，可按 name 过滤"""
-    conn = _get_db()
     if name:
-        rows = conn.execute(
-            "SELECT * FROM messages WHERE name = ? ORDER BY timestamp DESC LIMIT ?",
-            (name, limit)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM messages ORDER BY timestamp DESC LIMIT ?",
-            (limit,)
-        ).fetchall()
+        conditions.append("name = ?")
+        params.append(name)
+    if direction:
+        conditions.append("direction = ?")
+        params.append(direction)
+    if since:
+        conditions.append("timestamp > ?")
+        params.append(since)
+    if request_id:
+        conditions.append("request_id = ?")
+        params.append(request_id)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = conn.execute(
+        f"SELECT * FROM messages {where} ORDER BY timestamp DESC LIMIT ?",
+        [*params, limit]
+    ).fetchall()
     conn.close()
-    
+
     results = []
     for row in rows:
         results.append(Message(
             id=row["id"],
+            request_id=row["request_id"],
             type=row["type"],
             content=row["content"],
             media_url=row["media_url"],
@@ -206,8 +191,7 @@ def _list_messages(name: Optional[str] = None, limit: int = 50) -> list[Message]
     return results
 
 
-def _clean_old_messages():
-    """清理过期消息"""
+def _clean_old_messages() -> int:
     cutoff = time.time() - MESSAGE_RETENTION_DAYS * 86400
     conn = _get_db()
     conn.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
@@ -218,56 +202,14 @@ def _clean_old_messages():
 
 
 def _check_auth(authorization: Optional[str] = Header(None)):
-    """Bearer token 鉴权"""
+    if not API_KEY:
+        return
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing or invalid Authorization header")
     token = authorization[len("Bearer "):]
-    if not hmac.compare_digest(token, API_KEY):
+    if token != API_KEY:
         raise HTTPException(403, "Invalid API key")
 
-
-def _read_upload(file: UploadFile) -> tuple[str, str]:
-    """保存上传文件，返回 (relative_url, content_type)"""
-    ext = Path(file.filename or "file").suffix or ".bin"
-    fname = f"{uuid.uuid4().hex}{ext}"
-    dest = UPLOADS_DIR / fname
-    content = file.file.read()
-    dest.write_bytes(content)
-    rel_url = f"/uploads/{fname}"
-    ct = file.content_type or "application/octet-stream"
-    return rel_url, ct
-
-
-def _stream_file(path: Path, content_type: str):
-    """流式返回文件"""
-    if not path.exists():
-        raise HTTPException(404, "File not found")
-
-    def gen():
-        with open(path, "rb") as f:
-            while chunk := f.read(8192):
-                yield chunk
-
-    return StreamingResponse(gen(), media_type=content_type)
-
-
-# ─── FastAPI 应用 ───────────────────────────────────────────────────────────
-
-app = FastAPI(
-    title="Webhook API",
-    description="消息收发中间件 — 支持全类型媒体、OpenAI 兼容接口",
-    version="1.1.0",
-)
-
-
-# ─── 健康检查 ───────────────────────────────────────────────────────────────
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "api_key_set": API_KEY != "webhook-default-key-change-me"}
-
-
-# ─── 消息写入公共逻辑 ───────────────────────────────────────────────────────
 
 def _detect_type_from_ct(ct: str) -> str:
     if ct.startswith("image/"):
@@ -280,7 +222,6 @@ def _detect_type_from_ct(ct: str) -> str:
 
 
 async def _parse_message_payload(request) -> dict:
-    """同时支持 form-data / multipart / JSON 三种请求体，返回统一字段"""
     ct = (request.headers.get("content-type") or "").lower()
     payload = {"type": "text", "content": None, "caption": None,
                "media_url": None, "media": None, "metadata": {}}
@@ -298,7 +239,6 @@ async def _parse_message_payload(request) -> dict:
             payload["metadata"] = body.get("metadata") or {}
         return payload
 
-    # form-data / multipart
     try:
         form = await request.form()
     except Exception:
@@ -313,19 +253,17 @@ async def _parse_message_payload(request) -> dict:
     return payload
 
 
-def _build_message(name: Optional[str], direction: str, p: dict) -> Message:
-    """根据解析出的 payload 构造消息"""
+def _build_message(name: Optional[str], direction: str, p: dict,
+                   request_id: Optional[str] = None) -> Message:
     msg_type = p["type"] or "text"
     media_url = p["media_url"]
 
-    # 1) 上传文件优先（落盘到本地 uploads）
     if p["media"] is not None:
         rel_url, content_type = _read_upload(p["media"])
         media_url = rel_url
         if msg_type == "text":
             msg_type = _detect_type_from_ct(content_type)
 
-    # 2) 外部 URL 直接引用，不下载
     if media_url and msg_type == "text":
         low = media_url.lower().split("?")[0]
         if low.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")):
@@ -339,6 +277,7 @@ def _build_message(name: Optional[str], direction: str, p: dict) -> Message:
 
     return Message(
         id=str(uuid.uuid4()),
+        request_id=request_id,
         type=msg_type,
         content=p["caption"] or p["content"],
         media_url=media_url,
@@ -349,14 +288,67 @@ def _build_message(name: Optional[str], direction: str, p: dict) -> Message:
     )
 
 
-# ─── 入站 Webhook（接收方推送消息进来）────────────────────────────────────
+def _read_upload(file: UploadFile) -> tuple[str, str]:
+    ext = Path(file.filename or "file").suffix or ".bin"
+    fname = f"{uuid.uuid4().hex}{ext}"
+    dest = UPLOADS_DIR / fname
+
+    # 流式读取，限制大小
+    content = b""
+    total = 0
+    while True:
+        chunk = file.file.read(8192)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_SIZE:
+            dest.unlink(missing_ok=True)
+            raise HTTPException(413, f"File too large, max {MAX_UPLOAD_SIZE // 1024 // 1024}MB")
+        content += chunk
+
+    dest.write_bytes(content)
+    return f"/uploads/{fname}", file.content_type or "application/octet-stream"
+
+
+def _stream_file(path: Path, content_type: str):
+    if not path.exists():
+        raise HTTPException(404, "File not found")
+
+    size = path.stat().st_size
+    if size == 0:
+        return JSONResponse({"error": "empty file"}, status_code=204)
+
+    def gen():
+        with open(path, "rb") as f:
+            while chunk := f.read(8192):
+                yield chunk
+
+    return StreamingResponse(gen(), media_type=content_type)
+
+
+# ─── FastAPI 应用 ───────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="Webhook API",
+    description="消息收发中间件 — SQLite 存储、OpenAI 兼容接口、SSE 推流",
+    version="1.2.0",
+)
+
+
+# ─── 健康检查 ───────────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "api_key_set": bool(API_KEY)}
+
+
+# ─── 入站 Webhook ───────────────────────────────────────────────────────────
 
 @app.post("/webhook/inbound")
 async def inbound_no_name(
     request: Request,
     authorization: Optional[str] = Header(None),
 ):
-    """接收入站消息（无 name），支持 form-data / multipart / JSON"""
     _check_auth(authorization)
     p = await _parse_message_payload(request)
     msg = _build_message(None, "inbound", p)
@@ -368,25 +360,25 @@ async def inbound(
     request: Request,
     name: str = FastAPIPath(..., description="发送方标识"),
     authorization: Optional[str] = Header(None),
+    request_id: Optional[str] = Query(default=None, description="请求 ID 用于关联回复"),
 ):
-    """接收入站消息，支持 form-data / multipart / JSON"""
     _check_auth(authorization)
     p = await _parse_message_payload(request)
-    msg = _build_message(name, "inbound", p)
-    return {"status": "ok", "message_id": _save_message(msg)}
+    msg = _build_message(name, "inbound", p, request_id=request_id)
+    return {"status": "ok", "message_id": _save_message(msg), "request_id": msg.request_id}
 
 
-# ─── 出站 Webhook（写入回复消息）────────────────────────────────────────────
+# ─── 出站 Webhook ───────────────────────────────────────────────────────────
 
 @app.post("/webhook/outbound")
 async def outbound_write_no_name(
     request: Request,
     authorization: Optional[str] = Header(None),
+    request_id: Optional[str] = Query(default=None),
 ):
-    """写入 outbound 消息（无 name），支持 form-data / multipart / JSON"""
     _check_auth(authorization)
     p = await _parse_message_payload(request)
-    msg = _build_message(None, "outbound", p)
+    msg = _build_message(None, "outbound", p, request_id=request_id)
     return {"status": "ok", "message_id": _save_message(msg)}
 
 
@@ -395,57 +387,69 @@ async def outbound_write(
     request: Request,
     name: str = FastAPIPath(..., description="接收方标识"),
     authorization: Optional[str] = Header(None),
+    request_id: Optional[str] = Query(default=None),
 ):
-    """写入 outbound 回复消息，支持 form-data / multipart / JSON"""
     _check_auth(authorization)
     p = await _parse_message_payload(request)
-    msg = _build_message(name, "outbound", p)
+    msg = _build_message(name, "outbound", p, request_id=request_id)
     return {"status": "ok", "message_id": _save_message(msg)}
 
 
 @app.get("/webhook/outbound")
 async def outbound(
     name: Optional[str] = Query(default=None),
-    since: Optional[float] = Query(default=None, description="只返回此时间戳之后的消息"),
-    direction: Optional[str] = Query(default=None, description="过滤方向: inbound | outbound"),
+    since: Optional[float] = Query(default=None),
+    direction: Optional[str] = Query(default=None),
     limit: int = Query(default=50, le=200),
     authorization: Optional[str] = Header(None),
 ):
     _check_auth(authorization)
-    if since:
-        msgs = [m for m in _list_messages(name=name, limit=200) if m.timestamp > since]
-    else:
-        msgs = _list_messages(name=name, limit=200)
-    if direction:
-        msgs = [m for m in msgs if m.direction == direction]
-    msgs = msgs[:limit]
-    # 反向（最新的在前），然后反转成时间正序
+    msgs = _list_messages(name=name, limit=limit, direction=direction, since=since)
     msgs.reverse()
-    return {
-        "status": "ok",
-        "messages": [m.model_dump() for m in msgs],
-        "count": len(msgs),
-    }
+    return {"status": "ok", "messages": [m.model_dump() for m in msgs], "count": len(msgs)}
 
 
-# ─── 公开信号接口（无需鉴权，供外部轮询检查是否有新消息）────────────────────
+# ─── SSE 实时推流 ───────────────────────────────────────────────────────────
+
+@app.get("/stream/{name}")
+async def stream(
+    name: str = FastAPIPath(..., description="订阅名称"),
+    authorization: Optional[str] = Header(None),
+):
+    """SSE 实时推流：当有新消息时推送，替代轮询"""
+    _check_auth(authorization)
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        last_count = len(_list_messages(name=name, limit=1))
+        while True:
+            await asyncio.sleep(POLL_INTERVAL)
+            current_count = len(_list_messages(name=name, limit=100))
+            if current_count > last_count:
+                msgs = _list_messages(name=name, limit=100)
+                new_msgs = [m for m in msgs if m.timestamp > (msgs[-1].timestamp if msgs else 0)]
+                for m in new_msgs:
+                    yield f"data: {json.dumps(m.model_dump(), ensure_ascii=False)}\n\n"
+                last_count = current_count
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+    )
+
+
+# ─── 信号接口 ───────────────────────────────────────────────────────────────
 
 @app.get("/signal/{name}")
 async def signal(
     name: str = FastAPIPath(..., description="消息名称/发送方标识"),
 ):
-    """公开信号接口：返回指定 name 的最新消息数量和最新时间戳，无需鉴权。
-    用于外部钩子检测是否有新消息，避免轮询时携带密钥。"""
+    """公开信号接口：返回指定 name 的最新消息数量和最新时间戳"""
     msgs = _list_messages(name=name, limit=200)
     if not msgs:
         return {"name": name, "count": 0, "latest_timestamp": 0}
-    # 找最新的一条
     latest = max(msgs, key=lambda m: m.timestamp)
-    return {
-        "name": name,
-        "count": len(msgs),
-        "latest_timestamp": latest.timestamp,
-    }
+    return {"name": name, "count": len(msgs), "latest_timestamp": latest.timestamp}
 
 
 # ─── OpenAI 兼容接口 ────────────────────────────────────────────────────────
@@ -455,10 +459,11 @@ async def chat_completions(
     body: ChatCompletionRequest,
     authorization: Optional[str] = Header(None),
 ):
-    """OpenAI 兼容聊天接口：把用户消息入站，轮询接收方回复"""
+    """OpenAI 兼容聊天接口：把用户消息入站，等待回复后返回"""
     _check_auth(authorization)
 
-    # 取最后一条用户消息
+    request_id = body.request_id or str(uuid.uuid4())[:8]
+
     user_msg = None
     for m in reversed(body.messages):
         if m.role == "user":
@@ -467,9 +472,10 @@ async def chat_completions(
     if not user_msg:
         raise HTTPException(400, "No user message found")
 
-    # 存入 inbound
+    # 存入 inbound（带 request_id）
     msg = Message(
         id=str(uuid.uuid4()),
+        request_id=request_id,
         type="text",
         content=user_msg,
         name=body.name,
@@ -478,19 +484,16 @@ async def chat_completions(
     )
     _save_message(msg)
 
-    # 轮询 outbound 等回复（最多等 30 秒）
+    # 轮询 outbound 等回复（用 request_id 精确匹配）
     replies = []
     deadline = time.time() + 30
-    last_since = msg.timestamp
     while time.time() < deadline:
         await asyncio.sleep(0.5)
-        out_msgs = _list_messages(name=body.name, limit=10)
-        new_replies = [m for m in out_msgs if m.timestamp > last_since and m.direction == "outbound"]
-        if new_replies:
-            replies.extend(new_replies)
+        out_msgs = _list_messages(name=body.name, request_id=request_id, limit=10)
+        if out_msgs:
+            replies.extend(out_msgs)
             break
 
-    # 构造 OpenAI 格式的回复
     final_content = user_msg
     if replies:
         final_content = replies[-1].content or str(replies[-1].model_dump())
@@ -499,12 +502,7 @@ async def chat_completions(
         id=str(uuid.uuid4()),
         created=int(time.time()),
         model=body.model,
-        choices=[{
-            "index": 0,
-            "message": {"role": "assistant", "content": final_content},
-            "finish_reason": "stop",
-        }],
-        usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        choices=[{"index": 0, "message": {"role": "assistant", "content": final_content}}],
     )
 
 
@@ -514,14 +512,19 @@ async def chat_completions(
 async def download_file(filename: str = FastAPIPath(..., description="文件名")):
     """下载上传的媒体文件"""
     path = UPLOADS_DIR / filename
+
+    # 安全检查：防止路径穿越
+    if not path.resolve().startswith(UPLOADS_DIR.resolve()):
+        raise HTTPException(404, "File not found")
+
     ct = {
         ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".gif": "image/gif", ".webp": "image/webp",
+        ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
         ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
         ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
         ".pdf": "application/pdf",
     }.get(path.suffix, "application/octet-stream")
+
     return _stream_file(path, ct)
 
 
@@ -561,7 +564,14 @@ async def cleanup(
 ):
     _check_auth(authorization)
     deleted = _clean_old_messages()
-    return {"status": "ok", "cleaned": True}
+    return {"status": "ok", "cleaned": deleted}
+
+
+# ─── 定时清理（启动时）──────────────────────────────────────────────────────
+
+@app.on_event("startup")
+async def startup():
+    _clean_old_messages()
 
 
 # ─── 启动入口 ───────────────────────────────────────────────────────────────
