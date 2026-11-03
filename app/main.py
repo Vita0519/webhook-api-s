@@ -194,8 +194,8 @@ def _list_messages(name: Optional[str] = None, limit: int = 50,
 def _clean_old_messages() -> int:
     cutoff = time.time() - MESSAGE_RETENTION_DAYS * 86400
     conn = _get_db()
-    conn.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
-    deleted = conn.rowcount
+    cursor = conn.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
+    deleted = cursor.rowcount
     conn.commit()
     conn.close()
     return deleted
