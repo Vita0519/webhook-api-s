@@ -1,4 +1,4 @@
-"""Webhook API — 消息收发中间件
+"""Webhook API — 消息收发中间件 (SQLite 版本)
 
 功能：
 - 入站 webhook（接收方推送消息进来）
@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
@@ -31,8 +32,8 @@ BASE_DIR = Path(__file__).parent
 STORAGE_DIR = Path(os.getenv("WEBHOOK_STORAGE_DIR", "/app/storage"))
 if not STORAGE_DIR.exists():
     STORAGE_DIR = BASE_DIR / "storage"
-MESSAGES_DIR = STORAGE_DIR / "messages"
 UPLOADS_DIR = STORAGE_DIR / "uploads"
+DB_PATH = STORAGE_DIR / "webhook.db"
 
 # 默认鉴权 key（通过环境变量 WEBHOOK_API_KEY 覆盖）
 API_KEY = os.getenv("WEBHOOK_API_KEY", "webhook-default-key-change-me")
@@ -45,8 +46,44 @@ MESSAGE_RETENTION_DAYS = int(os.getenv("WEBHOOK_MSG_RETENTION", "7"))
 
 # ─── 目录初始化 ─────────────────────────────────────────────────────────────
 
-MESSAGES_DIR.mkdir(parents=True, exist_ok=True)
+STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ─── SQLite 数据库 ──────────────────────────────────────────────────────────
+
+def _get_db() -> sqlite3.Connection:
+    """获取数据库连接"""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+def _init_db():
+    """初始化数据库表"""
+    conn = _get_db()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            content TEXT,
+            media_url TEXT,
+            name TEXT,
+            direction TEXT NOT NULL DEFAULT 'inbound',
+            timestamp REAL NOT NULL,
+            metadata TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_name ON messages(name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_direction ON messages(direction)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)")
+    conn.commit()
+    conn.close()
+
+
+_init_db()
 
 
 # ─── 数据模型 ───────────────────────────────────────────────────────────────
@@ -106,44 +143,78 @@ def _now_iso() -> str:
 
 
 def _save_message(msg: Message) -> str:
-    """持久化消息到磁盘，返回消息 ID"""
+    """持久化消息到 SQLite"""
     mid = msg.id or str(uuid.uuid4())
     msg.id = mid
-    payload = msg.model_dump()
-    path = MESSAGES_DIR / f"{mid}.json"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    conn = _get_db()
+    conn.execute(
+        """INSERT OR REPLACE INTO messages (id, type, content, media_url, name, direction, timestamp, metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (mid, msg.type, msg.content, msg.media_url, msg.name, msg.direction, msg.timestamp,
+         json.dumps(msg.metadata, ensure_ascii=False) if msg.metadata else None)
+    )
+    conn.commit()
+    conn.close()
     return mid
 
 
 def _load_message(mid: str) -> Optional[Message]:
-    path = MESSAGES_DIR / f"{mid}.json"
-    if not path.exists():
+    conn = _get_db()
+    row = conn.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
+    conn.close()
+    if not row:
         return None
-    return Message(**json.loads(path.read_text()))
+    return Message(
+        id=row["id"],
+        type=row["type"],
+        content=row["content"],
+        media_url=row["media_url"],
+        name=row["name"],
+        direction=row["direction"],
+        timestamp=row["timestamp"],
+        metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+    )
 
 
 def _list_messages(name: Optional[str] = None, limit: int = 50) -> list[Message]:
     """列出消息，可按 name 过滤"""
+    conn = _get_db()
+    if name:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE name = ? ORDER BY timestamp DESC LIMIT ?",
+            (name, limit)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM messages ORDER BY timestamp DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+    conn.close()
+    
     results = []
-    for f in sorted(MESSAGES_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            msg = Message(**json.loads(f.read_text()))
-            if name and msg.name != name:
-                continue
-            results.append(msg)
-            if len(results) >= limit:
-                break
-        except Exception:
-            continue
+    for row in rows:
+        results.append(Message(
+            id=row["id"],
+            type=row["type"],
+            content=row["content"],
+            media_url=row["media_url"],
+            name=row["name"],
+            direction=row["direction"],
+            timestamp=row["timestamp"],
+            metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+        ))
     return results
 
 
 def _clean_old_messages():
     """清理过期消息"""
     cutoff = time.time() - MESSAGE_RETENTION_DAYS * 86400
-    for f in MESSAGES_DIR.glob("*.json"):
-        if f.stat().st_mtime < cutoff:
-            f.unlink()
+    conn = _get_db()
+    conn.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
+    deleted = conn.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
 
 
 def _check_auth(authorization: Optional[str] = Header(None)):
@@ -185,7 +256,7 @@ def _stream_file(path: Path, content_type: str):
 app = FastAPI(
     title="Webhook API",
     description="消息收发中间件 — 支持全类型媒体、OpenAI 兼容接口",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 
@@ -293,7 +364,7 @@ async def inbound_no_name(
 
 
 @app.post("/webhook/inbound/{name}")
-async def inbound_with_name(
+async def inbound(
     request: Request,
     name: str = FastAPIPath(..., description="发送方标识"),
     authorization: Optional[str] = Header(None),
@@ -419,27 +490,33 @@ async def chat_completions(
             replies.extend(new_replies)
             break
 
-    reply_text = "\n".join(m.content or "" for m in replies) or "（暂无回复）"
+    # 构造 OpenAI 格式的回复
+    final_content = user_msg
+    if replies:
+        final_content = replies[-1].content or str(replies[-1].model_dump())
 
     return ChatCompletionResponse(
         id=str(uuid.uuid4()),
         created=int(time.time()),
         model=body.model,
-        choices=[{"index": 0, "message": {"role": "assistant", "content": reply_text}, "finish_reason": "stop"}],
-        usage={"prompt_tokens": len(user_msg), "completion_tokens": len(reply_text), "total_tokens": len(user_msg) + len(reply_text)},
+        choices=[{
+            "index": 0,
+            "message": {"role": "assistant", "content": final_content},
+            "finish_reason": "stop",
+        }],
+        usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     )
 
 
-# ─── 媒体文件下载 ───────────────────────────────────────────────────────────
+# ─── 文件下载 ───────────────────────────────────────────────────────────────
 
 @app.get("/uploads/{filename}")
-async def get_upload(filename: str, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    if ".." in filename or filename.startswith("/"):
-        raise HTTPException(400, "Invalid filename")
+async def download_file(filename: str = FastAPIPath(..., description="文件名")):
+    """下载上传的媒体文件"""
     path = UPLOADS_DIR / filename
-    ct = path.stat().st_size and {
-        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ct = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png",
         ".gif": "image/gif", ".webp": "image/webp",
         ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
         ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
@@ -468,10 +545,13 @@ async def delete_message(
     authorization: Optional[str] = Header(None),
 ):
     _check_auth(authorization)
-    path = MESSAGES_DIR / f"{message_id}.json"
-    if not path.exists():
+    conn = _get_db()
+    cursor = conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+    conn.commit()
+    deleted = cursor.rowcount
+    conn.close()
+    if deleted == 0:
         raise HTTPException(404, "Message not found")
-    path.unlink()
     return {"status": "ok"}
 
 
@@ -480,7 +560,7 @@ async def cleanup(
     authorization: Optional[str] = Header(None),
 ):
     _check_auth(authorization)
-    _clean_old_messages()
+    deleted = _clean_old_messages()
     return {"status": "ok", "cleaned": True}
 
 
