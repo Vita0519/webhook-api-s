@@ -150,7 +150,9 @@ def _save_message(msg: Message) -> str:
 def _list_messages(name: Optional[str] = None, limit: int = 50,
                    direction: Optional[str] = None,
                    since: Optional[float] = None,
-                   request_id: Optional[str] = None) -> list[Message]:
+                   after: Optional[float] = None,
+                   request_id: Optional[str] = None,
+                   ascending: bool = False) -> list[Message]:
     conn = _get_db()
     conditions = []
     params = []
@@ -162,15 +164,19 @@ def _list_messages(name: Optional[str] = None, limit: int = 50,
         conditions.append("direction = ?")
         params.append(direction)
     if since:
-        conditions.append("timestamp > ?")
+        conditions.append("timestamp >= ?")
         params.append(since)
+    if after:
+        conditions.append("timestamp > ?")
+        params.append(after)
     if request_id:
         conditions.append("request_id = ?")
         params.append(request_id)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    order = "ASC" if ascending else "DESC"
     rows = conn.execute(
-        f"SELECT * FROM messages {where} ORDER BY timestamp DESC LIMIT ?",
+        f"SELECT * FROM messages {where} ORDER BY timestamp {order} LIMIT ?",
         [*params, limit]
     ).fetchall()
     conn.close()
@@ -418,18 +424,37 @@ async def stream(
 ):
     """SSE 实时推流：当有新消息时推送，替代轮询"""
     _check_auth(authorization)
+    _list_messages(name=name, limit=1)  # 触发建表
 
     async def event_stream() -> AsyncGenerator[str, None]:
-        last_count = len(_list_messages(name=name, limit=1))
+        last_ts = time.time()
+        conn = _get_db()
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(timestamp), 0) FROM messages WHERE name = ?",
+                (name,)
+            ).fetchone()
+            last_ts = max(last_ts, row[0])
+        finally:
+            conn.close()
+
         while True:
             await asyncio.sleep(POLL_INTERVAL)
-            current_count = len(_list_messages(name=name, limit=100))
-            if current_count > last_count:
-                msgs = _list_messages(name=name, limit=100)
-                new_msgs = [m for m in msgs if m.timestamp > (msgs[-1].timestamp if msgs else 0)]
-                for m in new_msgs:
+            conn = _get_db()
+            try:
+                row = conn.execute(
+                    "SELECT MAX(timestamp) FROM messages WHERE name = ? AND timestamp > ?",
+                    (name, last_ts)
+                ).fetchone()
+                latest = row[0] or 0
+            finally:
+                conn.close()
+
+            if latest > last_ts:
+                msgs = _list_messages(name=name, after=last_ts, limit=200, ascending=True)
+                for m in msgs:
                     yield f"data: {json.dumps(m.model_dump(), ensure_ascii=False)}\n\n"
-                last_count = current_count
+                last_ts = latest
 
     return StreamingResponse(
         event_stream(),
