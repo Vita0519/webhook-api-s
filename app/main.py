@@ -10,8 +10,10 @@
 """
 
 import asyncio
+import hmac
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -19,8 +21,8 @@ from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 from fastapi import FastAPI, UploadFile, HTTPException, Header, Query, Path as FastAPIPath, Request
-from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 # ─── 配置 ───────────────────────────────────────────────────────────────────
 
@@ -31,10 +33,21 @@ if not STORAGE_DIR.exists():
 UPLOADS_DIR = STORAGE_DIR / "uploads"
 DB_PATH = STORAGE_DIR / "webhook.db"
 
-API_KEY = os.getenv("WEBHOOK_API_KEY", "")
+API_KEY = os.getenv("WEBHOOK_API_KEY", "").strip()
+ALLOW_NO_AUTH = os.getenv("WEBHOOK_ALLOW_NO_AUTH", "") == "1"
 POLL_INTERVAL = int(os.getenv("WEBHOOK_POLL_INTERVAL", "2"))
 MESSAGE_RETENTION_DAYS = int(os.getenv("WEBHOOK_MSG_RETENTION", "7"))
 MAX_UPLOAD_SIZE = int(os.getenv("WEBHOOK_MAX_UPLOAD_MB", "50")) * 1024 * 1024  # 默认 50MB
+CHAT_TIMEOUT = float(os.getenv("WEBHOOK_CHAT_TIMEOUT", "30"))
+MAX_CONTENT_CHARS = int(os.getenv("WEBHOOK_MAX_CONTENT_CHARS", "200000"))
+CLEANUP_INTERVAL_SECONDS = int(os.getenv("WEBHOOK_CLEANUP_INTERVAL", "3600"))
+ALLOWED_MESSAGE_TYPES = {"text", "image", "video", "audio", "file"}
+
+if not API_KEY and not ALLOW_NO_AUTH:
+    raise RuntimeError(
+        "WEBHOOK_API_KEY is required. Set it in the environment, "
+        "or set WEBHOOK_ALLOW_NO_AUTH=1 only for local development."
+    )
 
 # ─── 目录初始化 ─────────────────────────────────────────────────────────────
 
@@ -47,7 +60,6 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 def _get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
@@ -55,6 +67,7 @@ def _get_db() -> sqlite3.Connection:
 
 def _init_db():
     conn = _get_db()
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
@@ -90,7 +103,7 @@ class Message(BaseModel):
     name: Optional[str] = None
     direction: str = "inbound"
     timestamp: float
-    metadata: dict = {}
+    metadata: dict = Field(default_factory=dict)
 
 
 class WebhookPayload(BaseModel):
@@ -98,7 +111,7 @@ class WebhookPayload(BaseModel):
     content: Optional[str] = None
     caption: Optional[str] = None
     media_url: Optional[str] = None
-    metadata: dict = {}
+    metadata: dict = Field(default_factory=dict)
 
 
 class ChatMessage(BaseModel):
@@ -124,8 +137,9 @@ class ChatCompletionResponse(BaseModel):
     object: str = "chat.completion"
     created: int
     model: str
+    request_id: Optional[str] = None
     choices: list[ChatCompletionChoice]
-    usage: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    usage: dict = Field(default_factory=lambda: {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
 
 
 # ─── 工具函数 ───────────────────────────────────────────────────────────────
@@ -163,10 +177,10 @@ def _list_messages(name: Optional[str] = None, limit: int = 50,
     if direction:
         conditions.append("direction = ?")
         params.append(direction)
-    if since:
-        conditions.append("timestamp >= ?")
+    if since is not None:
+        conditions.append("timestamp > ?")
         params.append(since)
-    if after:
+    if after is not None:
         conditions.append("timestamp > ?")
         params.append(after)
     if request_id:
@@ -211,10 +225,16 @@ def _check_auth(authorization: Optional[str] = Header(None)):
     if not API_KEY:
         return
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing or invalid Authorization header")
-    token = authorization[len("Bearer "):]
-    if token != API_KEY:
-        raise HTTPException(403, "Invalid API key")
+        raise HTTPException(
+            401, "Missing or invalid Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = authorization[len("Bearer "):].strip()
+    if not hmac.compare_digest(token, API_KEY):
+        raise HTTPException(
+            401, "Invalid API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def _detect_type_from_ct(ct: str) -> str:
@@ -235,24 +255,26 @@ async def _parse_message_payload(request) -> dict:
     if "application/json" in ct:
         try:
             body = await request.json()
-        except Exception:
-            body = {}
-        if isinstance(body, dict):
-            payload["type"] = body.get("type") or "text"
-            payload["content"] = body.get("content")
-            payload["caption"] = body.get("caption")
-            payload["media_url"] = body.get("media_url") or body.get("url")
-            payload["metadata"] = body.get("metadata") or {}
+        except Exception as exc:
+            raise HTTPException(400, "Invalid JSON body") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(400, "JSON body must be an object")
+        payload["type"] = body.get("type") or "text"
+        payload["content"] = body.get("content")
+        payload["caption"] = body.get("caption")
+        payload["media_url"] = body.get("media_url") or body.get("url")
+        payload["metadata"] = body.get("metadata") or {}
         return payload
 
     try:
         form = await request.form()
-    except Exception:
-        form = {}
+    except Exception as exc:
+        raise HTTPException(400, "Invalid form payload") from exc
     payload["type"] = form.get("type") or "text"
     payload["content"] = form.get("content")
     payload["caption"] = form.get("caption")
     payload["media_url"] = form.get("media_url") or form.get("url")
+    payload["request_id"] = form.get("request_id")
     media = form.get("media")
     if media is not None and getattr(media, "filename", None):
         payload["media"] = media
@@ -262,6 +284,12 @@ async def _parse_message_payload(request) -> dict:
 def _build_message(name: Optional[str], direction: str, p: dict,
                    request_id: Optional[str] = None) -> Message:
     msg_type = p["type"] or "text"
+    if msg_type not in ALLOWED_MESSAGE_TYPES:
+        raise HTTPException(400, f"Unsupported message type: {msg_type}")
+    if not any([p.get("content"), p.get("caption"), p.get("media_url"), p.get("media")]):
+        raise HTTPException(400, "Empty message: content, caption, media_url or media is required")
+    if p.get("content") and len(str(p["content"])) > MAX_CONTENT_CHARS:
+        raise HTTPException(413, f"content exceeds {MAX_CONTENT_CHARS} characters")
     media_url = p["media_url"]
 
     if p["media"] is not None:
@@ -295,41 +323,39 @@ def _build_message(name: Optional[str], direction: str, p: dict,
 
 
 def _read_upload(file: UploadFile) -> tuple[str, str]:
-    ext = Path(file.filename or "file").suffix or ".bin"
+    ext = Path(file.filename or "file").suffix.lower()
+    if len(ext) > 10 or not re.fullmatch(r"\.[a-z0-9]+", ext):
+        ext = ".bin"
     fname = f"{uuid.uuid4().hex}{ext}"
     dest = UPLOADS_DIR / fname
 
-    # 流式读取，限制大小
-    content = b""
+    # 流式写入，避免把整个文件读进内存
     total = 0
-    while True:
-        chunk = file.file.read(8192)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > MAX_UPLOAD_SIZE:
-            dest.unlink(missing_ok=True)
-            raise HTTPException(413, f"File too large, max {MAX_UPLOAD_SIZE // 1024 // 1024}MB")
-        content += chunk
+    try:
+        with open(dest, "wb") as out:
+            while True:
+                chunk = file.file.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPLOAD_SIZE:
+                    raise HTTPException(413, f"File too large, max {MAX_UPLOAD_SIZE // 1024 // 1024}MB")
+                out.write(chunk)
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
 
-    dest.write_bytes(content)
     return f"/uploads/{fname}", file.content_type or "application/octet-stream"
 
 
 def _stream_file(path: Path, content_type: str):
-    if not path.exists():
+    if not path.is_file():
         raise HTTPException(404, "File not found")
-
-    size = path.stat().st_size
-    if size == 0:
-        return JSONResponse({"error": "empty file"}, status_code=204)
-
-    def gen():
-        with open(path, "rb") as f:
-            while chunk := f.read(8192):
-                yield chunk
-
-    return StreamingResponse(gen(), media_type=content_type)
+    return FileResponse(
+        path,
+        media_type=content_type,
+        headers={"Content-Disposition": "inline"},
+    )
 
 
 # ─── FastAPI 应用 ───────────────────────────────────────────────────────────
@@ -345,7 +371,7 @@ app = FastAPI(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "api_key_set": bool(API_KEY)}
+    return {"status": "ok"}
 
 
 # ─── 入站 Webhook ───────────────────────────────────────────────────────────
@@ -370,7 +396,7 @@ async def inbound(
 ):
     _check_auth(authorization)
     p = await _parse_message_payload(request)
-    msg = _build_message(name, "inbound", p, request_id=request_id)
+    msg = _build_message(name, "inbound", p, request_id=request_id or p.get("request_id"))
     return {"status": "ok", "message_id": _save_message(msg), "request_id": msg.request_id}
 
 
@@ -397,7 +423,7 @@ async def outbound_write(
 ):
     _check_auth(authorization)
     p = await _parse_message_payload(request)
-    msg = _build_message(name, "outbound", p, request_id=request_id)
+    msg = _build_message(name, "outbound", p, request_id=request_id or p.get("request_id"))
     return {"status": "ok", "message_id": _save_message(msg)}
 
 
@@ -406,7 +432,7 @@ async def outbound(
     name: Optional[str] = Query(default=None),
     since: Optional[float] = Query(default=None),
     direction: Optional[str] = Query(default=None),
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, ge=1, le=200),
     authorization: Optional[str] = Header(None),
 ):
     _check_auth(authorization)
@@ -424,42 +450,35 @@ async def stream(
 ):
     """SSE 实时推流：当有新消息时推送，替代轮询"""
     _check_auth(authorization)
-    _list_messages(name=name, limit=1)  # 触发建表
 
     async def event_stream() -> AsyncGenerator[str, None]:
-        last_ts = time.time()
         conn = _get_db()
         try:
             row = conn.execute(
                 "SELECT COALESCE(MAX(timestamp), 0) FROM messages WHERE name = ?",
                 (name,)
             ).fetchone()
-            last_ts = max(last_ts, row[0])
+            last_ts = max(time.time(), row[0])
         finally:
             conn.close()
 
         while True:
-            await asyncio.sleep(POLL_INTERVAL)
-            conn = _get_db()
-            try:
-                row = conn.execute(
-                    "SELECT MAX(timestamp) FROM messages WHERE name = ? AND timestamp > ?",
-                    (name, last_ts)
-                ).fetchone()
-                latest = row[0] or 0
-            finally:
-                conn.close()
+            # 每批最多取 200 条，游标推进到“本批最后实际推送的那条”，
+            # 积压超过 200 条时下一轮继续取，不丢消息。
+            msgs = _list_messages(name=name, after=last_ts, limit=200, ascending=True)
+            if not msgs:
+                yield ": ping\n\n"
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
 
-            if latest > last_ts:
-                msgs = _list_messages(name=name, after=last_ts, limit=200, ascending=True)
-                for m in msgs:
-                    yield f"data: {json.dumps(m.model_dump(), ensure_ascii=False)}\n\n"
-                last_ts = latest
+            for m in msgs:
+                yield f"data: {json.dumps(m.model_dump(), ensure_ascii=False)}\n\n"
+            last_ts = msgs[-1].timestamp
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
 
 
@@ -469,12 +488,16 @@ async def stream(
 async def signal(
     name: str = FastAPIPath(..., description="消息名称/发送方标识"),
 ):
-    """公开信号接口：返回指定 name 的最新消息数量和最新时间戳"""
-    msgs = _list_messages(name=name, limit=200)
-    if not msgs:
-        return {"name": name, "count": 0, "latest_timestamp": 0}
-    latest = max(msgs, key=lambda m: m.timestamp)
-    return {"name": name, "count": len(msgs), "latest_timestamp": latest.timestamp}
+    """公开信号接口：返回指定 name 的消息总数和最新时间戳"""
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count, COALESCE(MAX(timestamp), 0) AS latest FROM messages WHERE name = ?",
+            (name,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return {"name": name, "count": row["count"], "latest_timestamp": row["latest"]}
 
 
 # ─── OpenAI 兼容接口 ────────────────────────────────────────────────────────
@@ -498,6 +521,7 @@ async def chat_completions(
         raise HTTPException(400, "No user message found")
 
     # 存入 inbound（带 request_id）
+    started = time.time()
     msg = Message(
         id=str(uuid.uuid4()),
         request_id=request_id,
@@ -505,28 +529,37 @@ async def chat_completions(
         content=user_msg,
         name=body.name,
         direction="inbound",
-        timestamp=time.time(),
+        timestamp=started,
     )
     _save_message(msg)
 
-    # 轮询 outbound 等回复（用 request_id 精确匹配）
-    replies = []
-    deadline = time.time() + 30
+    # 只等待本次请求之后、同 request_id 的 outbound 回复
+    reply = None
+    deadline = started + CHAT_TIMEOUT
     while time.time() < deadline:
-        await asyncio.sleep(0.5)
-        out_msgs = _list_messages(name=body.name, request_id=request_id, limit=10)
-        if out_msgs:
-            replies.extend(out_msgs)
+        await asyncio.sleep(0.25)
+        replies = _list_messages(
+            name=body.name,
+            direction="outbound",
+            request_id=request_id,
+            since=started,
+            limit=1,
+            ascending=True,
+        )
+        if replies:
+            reply = replies[0]
             break
 
-    final_content = user_msg
-    if replies:
-        final_content = replies[-1].content or str(replies[-1].model_dump())
+    if reply is None:
+        raise HTTPException(504, "No reply from agent before timeout")
+
+    final_content = reply.content or str(reply.model_dump())
 
     return ChatCompletionResponse(
         id=str(uuid.uuid4()),
         created=int(time.time()),
         model=body.model,
+        request_id=request_id,
         choices=[{"index": 0, "message": {"role": "assistant", "content": final_content}}],
     )
 
@@ -558,7 +591,7 @@ async def download_file(filename: str = FastAPIPath(..., description="文件名"
 @app.get("/api/messages")
 async def list_api(
     name: Optional[str] = Query(default=None),
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, ge=1, le=200),
     authorization: Optional[str] = Header(None),
 ):
     _check_auth(authorization)
