@@ -44,17 +44,20 @@ docker compose up -d
 
 ## 鉴权
 
-所有接口需要 Header：`Authorization: Bearer <API_KEY>`（未设置则跳过鉴权，本地开发可用）
+所有接口需要 Header：`Authorization: Bearer <API_KEY>`。未设置 `WEBHOOK_API_KEY` 时默认拒绝启动；仅本地开发可显式设置 `WEBHOOK_ALLOW_NO_AUTH=1` 临时关闭鉴权。
 
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| WEBHOOK_API_KEY | 空 | API 密钥（留空=无鉴权） |
+| WEBHOOK_API_KEY | 无（必填） | API 密钥，未设置时拒绝启动 |
+| WEBHOOK_ALLOW_NO_AUTH | 关闭 | 设为 1 允许无鉴权（仅本地开发） |
 | WEBHOOK_POLL_INTERVAL | 2 | 轮询间隔（秒） |
 | WEBHOOK_MSG_RETENTION | 7 | 消息保留天数 |
+| WEBHOOK_CHAT_TIMEOUT | 30 | /v1/chat/completions 等待回复秒数 |
 | WEBHOOK_STORAGE_DIR | /app/storage | 存储目录 |
 | WEBHOOK_MAX_UPLOAD_MB | 50 | 上传大小上限（MB） |
+| WEBHOOK_CLEANUP_INTERVAL | 3600 | 过期消息清理间隔（秒） |
 
 ## 存储
 
@@ -66,20 +69,18 @@ docker compose up -d
 发起聊天时传入 request_id，回复时带回同一个 request_id：
 
 ```bash
-# 发起请求（带 request_id）
-curl -X POST http://localhost:8100/webhook/inbound/muse1号 \
+# 发起请求（带 request_id，走 query 参数）
+curl -X POST "http://localhost:8100/webhook/inbound/muse1号?request_id=abc123" \
   -H "Authorization: Bearer $KEY" \
-  -F "type=text" -F "content=你好" \
-  -F "request_id=abc123"
+  -F "type=text" -F "content=你好"
 
 # 智能体回复时带上同一个 request_id
-curl -X POST http://localhost:8100/webhook/outbound/muse1号 \
+curl -X POST "http://localhost:8100/webhook/outbound/muse1号?request_id=abc123" \
   -H "Authorization: Bearer $KEY" \
-  -F "type=text" -F "content=你好！我是 Muse" \
-  -F "request_id=abc123"
+  -F "type=text" -F "content=你好！我是 Muse"
 ```
 
-`/v1/chat/completions` 接口会自动生成 request_id 并关联回复。
+`/v1/chat/completions` 会生成或复用 request_id，并只在本次请求之后等待 `direction=outbound` 的匹配回复；超时返回 504，不会回显用户输入。
 
 ## SSE 推流示例
 

@@ -43,15 +43,15 @@ curl -N "http://localhost:8100/stream/muse1号" -H "Authorization: Bearer webhoo
 发起消息时带 request_id，回复时原样带回：
 
 ```bash
-# 发请求
-curl -X POST http://localhost:8100/webhook/inbound/muse1号 \
-  -H "Authorization: Bearer webhook-default-key-change-me" \
-  -F "type=text" -F "content=你好" -F "request_id=abc123"
+# 发请求（request_id 走 query 参数）
+curl -X POST "http://localhost:8100/webhook/inbound/muse1号?request_id=abc123" \
+  -H "Authorization: Bearer $WEBHOOK_API_KEY" \
+  -F "type=text" -F "content=你好"
 
 # 回复时带上同一个 request_id
-curl -X POST http://localhost:8100/webhook/outbound/muse1号 \
-  -H "Authorization: Bearer webhook-default-key-change-me" \
-  -F "type=text" -F "content=收到" -F "request_id=abc123"
+curl -X POST "http://localhost:8100/webhook/outbound/muse1号?request_id=abc123" \
+  -H "Authorization: Bearer $WEBHOOK_API_KEY" \
+  -F "type=text" -F "content=收到"
 ```
 
 ## API 端点
