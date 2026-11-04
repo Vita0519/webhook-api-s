@@ -539,7 +539,7 @@ async def download_file(filename: str = FastAPIPath(..., description="文件名"
     path = UPLOADS_DIR / filename
 
     # 安全检查：防止路径穿越
-    if not path.resolve().startswith(UPLOADS_DIR.resolve()):
+    if not path.resolve().is_relative_to(UPLOADS_DIR.resolve()):
         raise HTTPException(404, "File not found")
 
     ct = {
