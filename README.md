@@ -4,8 +4,25 @@
 
 ## 快速启动
 
+镜像由 GitHub Actions 在 push main 时自动构建并推送：
+
+```
+ghcr.io/sxkiss/webhook-api:latest
+ghcr.io/sxkiss/webhook-api:<commit>
+```
+
 ```bash
-cd /home/sxkiss/webhook-api
+cp .env.example .env   # 填入 WEBHOOK_API_KEY
+docker compose pull
+docker compose up -d
+```
+
+启动文件 `docker-compose.yml` 直接使用远程镜像 `ghcr.io/sxkiss/webhook-api:latest`（`pull_policy: always`），不在本机构建。
+
+本地开发需要自己构建时：
+
+```bash
+docker build -t ghcr.io/sxkiss/webhook-api:latest .
 docker compose up -d
 ```
 

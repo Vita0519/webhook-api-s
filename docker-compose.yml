@@ -1,8 +1,7 @@
 services:
   webhook-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/sxkiss/webhook-api:latest
+    pull_policy: always
     container_name: webhook-api
     ports:
       - "8100:8100"
