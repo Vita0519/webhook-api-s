@@ -1,6 +1,6 @@
 services:
   webhook-api:
-    image: ghcr.io/sxkiss/webhook-api:latest
+    image: ghcr.nju.edu.cn/sxkiss/webhook-api:latest
     pull_policy: always
     container_name: webhook-api
     ports:
