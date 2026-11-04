@@ -101,3 +101,40 @@ def test_chat_completion_timeout_does_not_echo(monkeypatch):
         },
     )
     assert r.status_code == 504
+
+
+def test_write_response_has_upload_success_fields():
+    r = client.post(
+        "/webhook/outbound/resp-contract", headers=AUTH,
+        data={"type": "image", "caption": "回执字段"},
+        files={"media": ("p.png", b"png-bytes", "image/png")},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["success"] is True
+    assert data["status"] == "ok"
+    assert data["uploaded"] is True
+    assert data["media_uploaded"] is True
+    assert data["media_url"].startswith("/uploads/")
+    assert data["message_id"] == data["id"]
+
+
+def test_outbound_retry_is_idempotent():
+    payload = {"type": "video", "caption": "重复视频", "request_id": "rid-dup-1"}
+    first = client.post(
+        "/webhook/outbound/dup-test", headers=AUTH,
+        data=payload, files={"media": ("a.mp4", b"video-a", "video/mp4")},
+    )
+    second = client.post(
+        "/webhook/outbound/dup-test", headers=AUTH,
+        data=payload, files={"media": ("b.mp4", b"video-a", "video/mp4")},
+    )
+    assert first.status_code == 200 and second.status_code == 200
+    d1, d2 = first.json(), second.json()
+    assert d1["duplicate"] is False
+    assert d2["duplicate"] is True
+    assert d1["message_id"] == d2["message_id"]
+    msgs = client.get(
+        "/webhook/outbound?name=dup-test&direction=outbound", headers=AUTH
+    ).json()["messages"]
+    assert len(msgs) == 1

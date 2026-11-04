@@ -41,6 +41,8 @@ MAX_UPLOAD_SIZE = int(os.getenv("WEBHOOK_MAX_UPLOAD_MB", "50")) * 1024 * 1024  #
 CHAT_TIMEOUT = float(os.getenv("WEBHOOK_CHAT_TIMEOUT", "30"))
 MAX_CONTENT_CHARS = int(os.getenv("WEBHOOK_MAX_CONTENT_CHARS", "200000"))
 CLEANUP_INTERVAL_SECONDS = int(os.getenv("WEBHOOK_CLEANUP_INTERVAL", "3600"))
+# 同一 request_id + 相同内容在窗口内重复提交时，按幂等处理，不再落新消息
+IDEMPOTENCY_WINDOW = float(os.getenv("WEBHOOK_IDEMPOTENCY_WINDOW", "120"))
 ALLOWED_MESSAGE_TYPES = {"text", "image", "video", "audio", "file"}
 
 if not API_KEY and not ALLOW_NO_AUTH:
@@ -161,6 +163,100 @@ def _save_message(msg: Message) -> str:
     return mid
 
 
+def _message_response(msg: Message, mid: str, duplicate: bool = False) -> dict:
+    """统一的写消息回执：显式给出成功、上传结果与媒体地址。"""
+    return {
+        "success": True,
+        "status": "ok",
+        "id": mid,
+        "message_id": mid,
+        "request_id": msg.request_id,
+        "name": msg.name,
+        "direction": msg.direction,
+        "type": msg.type,
+        "content": msg.content,
+        "media_url": msg.media_url,
+        "uploaded": bool(msg.media_url),
+        "media_uploaded": bool(msg.media_url),
+        "timestamp": msg.timestamp,
+        "duplicate": duplicate,
+    }
+
+
+def _find_duplicate_message(msg: Message, window: float) -> Optional[Message]:
+    """窗口内重复提交检测（幂等）。
+
+    不比较 media_url：客户端重传会生成新的 /uploads/<uuid> 文件名。
+    - 有 request_id：按 name+direction+request_id+type+content 精确匹配
+    - 无 request_id：仅对「媒体消息」按 name+direction+type+content 匹配
+      （纯文本不去重，避免把连发的两句相同话误杀）
+    """
+    if not msg.request_id and not msg.media_url:
+        return None
+
+    conn = _get_db()
+    try:
+        if msg.request_id:
+            row = conn.execute(
+                """SELECT * FROM messages
+                   WHERE name IS ? AND direction = ? AND request_id = ?
+                     AND type = ? AND COALESCE(content, '') = COALESCE(?, '')
+                     AND timestamp > ?
+                   ORDER BY timestamp DESC LIMIT 1""",
+                (msg.name, msg.direction, msg.request_id, msg.type,
+                 msg.content, time.time() - window),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """SELECT * FROM messages
+                   WHERE name IS ? AND direction = ? AND type = ?
+                     AND COALESCE(content, '') = COALESCE(?, '')
+                     AND media_url IS NOT NULL
+                     AND timestamp > ?
+                   ORDER BY timestamp DESC LIMIT 1""",
+                (msg.name, msg.direction, msg.type, msg.content,
+                 time.time() - window),
+            ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return None
+    return Message(
+        id=row["id"],
+        request_id=row["request_id"],
+        type=row["type"],
+        content=row["content"],
+        media_url=row["media_url"],
+        name=row["name"],
+        direction=row["direction"],
+        timestamp=row["timestamp"],
+        metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+    )
+
+
+def _remove_upload(rel_url: Optional[str]):
+    """删除重传产生的孤儿文件（仅限 UPLOADS_DIR 内）。"""
+    if not rel_url or not rel_url.startswith("/uploads/"):
+        return
+    try:
+        path = (UPLOADS_DIR / Path(rel_url).name).resolve()
+        if path.is_relative_to(UPLOADS_DIR.resolve()):
+            path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _save_with_idempotency(msg: Message) -> tuple[Message, str, bool]:
+    """保存消息（带幂等）。返回 (实际生效的消息, message_id, 是否为重复)。"""
+    dup = _find_duplicate_message(msg, IDEMPOTENCY_WINDOW)
+    if dup:
+        if msg.media_url and msg.media_url != dup.media_url:
+            _remove_upload(msg.media_url)
+        return dup, dup.id, True
+    return msg, _save_message(msg), False
+
+
 def _list_messages(name: Optional[str] = None, limit: int = 50,
                    direction: Optional[str] = None,
                    since: Optional[float] = None,
@@ -264,6 +360,7 @@ async def _parse_message_payload(request) -> dict:
         payload["caption"] = body.get("caption")
         payload["media_url"] = body.get("media_url") or body.get("url")
         payload["metadata"] = body.get("metadata") or {}
+        payload["request_id"] = body.get("request_id")
         return payload
 
     try:
@@ -383,8 +480,9 @@ async def inbound_no_name(
 ):
     _check_auth(authorization)
     p = await _parse_message_payload(request)
-    msg = _build_message(None, "inbound", p)
-    return {"status": "ok", "message_id": _save_message(msg)}
+    msg = _build_message(None, "inbound", p, request_id=p.get("request_id"))
+    saved, mid, dup = _save_with_idempotency(msg)
+    return _message_response(saved, mid, duplicate=dup)
 
 
 @app.post("/webhook/inbound/{name}")
@@ -397,7 +495,8 @@ async def inbound(
     _check_auth(authorization)
     p = await _parse_message_payload(request)
     msg = _build_message(name, "inbound", p, request_id=request_id or p.get("request_id"))
-    return {"status": "ok", "message_id": _save_message(msg), "request_id": msg.request_id}
+    saved, mid, dup = _save_with_idempotency(msg)
+    return _message_response(saved, mid, duplicate=dup)
 
 
 # ─── 出站 Webhook ───────────────────────────────────────────────────────────
@@ -410,8 +509,9 @@ async def outbound_write_no_name(
 ):
     _check_auth(authorization)
     p = await _parse_message_payload(request)
-    msg = _build_message(None, "outbound", p, request_id=request_id)
-    return {"status": "ok", "message_id": _save_message(msg)}
+    msg = _build_message(None, "outbound", p, request_id=request_id or p.get("request_id"))
+    saved, mid, dup = _save_with_idempotency(msg)
+    return _message_response(saved, mid, duplicate=dup)
 
 
 @app.post("/webhook/outbound/{name}")
@@ -424,7 +524,8 @@ async def outbound_write(
     _check_auth(authorization)
     p = await _parse_message_payload(request)
     msg = _build_message(name, "outbound", p, request_id=request_id or p.get("request_id"))
-    return {"status": "ok", "message_id": _save_message(msg)}
+    saved, mid, dup = _save_with_idempotency(msg)
+    return _message_response(saved, mid, duplicate=dup)
 
 
 @app.get("/webhook/outbound")
