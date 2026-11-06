@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 from fastapi import FastAPI, UploadFile, HTTPException, Header, Query, Path as FastAPIPath, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 # ─── 配置 ───────────────────────────────────────────────────────────────────
@@ -462,6 +463,28 @@ app = FastAPI(
     description="消息收发中间件 — SQLite 存储、OpenAI 兼容接口、SSE 推流",
     version="1.2.0",
 )
+
+# ─── 工作台：账号权限 / 信箱检测 / 链路推断 / 实时推送 ──────────────────────
+
+try:
+    from . import console as console_api
+except ImportError:  # 直接以脚本方式运行时
+    import console as console_api  # type: ignore[no-redef]
+
+console_api.configure(STORAGE_DIR, API_KEY, ALLOW_NO_AUTH)
+app.include_router(console_api.router)
+
+
+# ─── 静态页面：中继台 ───────────────────────────────────────────────────────
+
+VIZ_DIR = BASE_DIR / "static" / "viz"
+if VIZ_DIR.is_dir():
+    app.mount("/viz", StaticFiles(directory=str(VIZ_DIR), html=True), name="viz")
+
+    @app.get("/", include_in_schema=False)
+    async def index():
+        """根路径进中继台页面"""
+        return RedirectResponse("/viz/", status_code=307)
 
 
 # ─── 健康检查 ───────────────────────────────────────────────────────────────
