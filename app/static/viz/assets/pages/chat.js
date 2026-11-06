@@ -290,9 +290,23 @@ function shortWhen(ts) {
   return sameDay ? fmtTime(ts) : fmtDay(ts);
 }
 
+function safeUrl(raw) {
+  const u = String(raw || '').trim();
+  if (!u) return '';
+  const low = u.toLowerCase();
+  if (low.startsWith('javascript:') || low.startsWith('data:')
+      || low.startsWith('vbscript:') || low.startsWith('file:')) return '';
+  if (u.startsWith('/uploads/')) return u.includes('..') || u.includes('\\') ? '' : u;
+  try {
+    const p = new URL(u, location.origin);
+    return (p.protocol === 'http:' || p.protocol === 'https:') ? u : '';
+  } catch { return ''; }
+}
+
 function mediaHtml(m) {
   if (!m.media_url) return '';
-  const url = esc(m.media_url);
+  const url = esc(safeUrl(m.media_url));
+  if (!url) return '<span class="file">[附件链接已拦截]</span>';
   if (m.type === 'image') return `<img src="${url}" alt="图片" loading="lazy" onerror="this.remove()">`;
   if (m.type === 'video') return `<video src="${url}" controls preload="metadata"></video>`;
   if (m.type === 'audio') return `<audio src="${url}" controls preload="metadata"></audio>`;

@@ -139,7 +139,8 @@ def _init_db() -> None:
                 role TEXT NOT NULL DEFAULT 'viewer',
                 created_at REAL NOT NULL,
                 last_login REAL,
-                must_change INTEGER NOT NULL DEFAULT 0
+                must_change INTEGER NOT NULL DEFAULT 0,
+                token_version INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS console_agents (
                 name TEXT PRIMARY KEY,
@@ -159,19 +160,33 @@ def _init_db() -> None:
         conn.commit()
     finally:
         conn.close()
+    # 旧库升级：补 token_version 列（已存在则忽略）
+    try:
+        _exec("ALTER TABLE console_users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
 
 
 def _bootstrap_admin() -> None:
-    """首次启动建一个 admin，密码取 API_KEY（无 API_KEY 时用 admin）。"""
-    row = _q("SELECT COUNT(*) AS c FROM console_users")
-    if row and row["c"]:
-        return
-    password = _STATE["api_key"] or "admin"
-    _exec(
-        "INSERT INTO console_users (id, username, password_hash, role, created_at, must_change) "
-        "VALUES (?, ?, ?, ?, ?, 1)",
-        (str(secrets.token_hex(8)), "admin", _hash_pw(password), "admin", time.time()),
-    )
+    """首次启动建一个 admin。密码取 API_KEY；无 API_KEY 时生成随机密码并打印一次。
+    INSERT OR IGNORE：多 worker 并发启动时只有真正插入成功的那个才打印密码。"""
+    has_key = bool(_STATE["api_key"])
+    password = _STATE["api_key"] if has_key else secrets.token_urlsafe(12)
+    try:
+        inserted = _exec(
+            "INSERT OR IGNORE INTO console_users (id, username, password_hash, role, created_at, must_change) "
+            "VALUES (?, ?, ?, ?, ?, 1)",
+            (str(secrets.token_hex(8)), "admin", _hash_pw(password), "admin", time.time()),
+        )
+    except sqlite3.IntegrityError:
+        return  # 另一个 worker 已创建
+    if not has_key and inserted:
+        print(
+            "[console] 未设置 WEBHOOK_API_KEY，已生成随机初始管理员密码（仅本次打印）：\n"
+            f"[console]   admin / {password}\n"
+            "[console] 登录后请立即修改密码。",
+            flush=True,
+        )
 
 
 # ─── 密码与会话 ─────────────────────────────────────────────────────────────
@@ -200,9 +215,10 @@ def _secret() -> bytes:
     row = _q("SELECT v FROM console_settings WHERE k = ?", (SESSION_SECRET_KEY,))
     if not row:
         value = secrets.token_hex(32)
-        _exec("INSERT OR REPLACE INTO console_settings (k, v) VALUES (?, ?)",
+        _exec("INSERT OR IGNORE INTO console_settings (k, v) VALUES (?, ?)",
               (SESSION_SECRET_KEY, value))
-        return value.encode()
+        row = _q("SELECT v FROM console_settings WHERE k = ?", (SESSION_SECRET_KEY,))
+        return str(row["v"]).encode()
     return str(row["v"]).encode()
 
 
@@ -210,21 +226,39 @@ def _sign(payload: str) -> str:
     return hmac.new(_secret(), payload.encode(), hashlib.sha256).hexdigest()
 
 
-def _make_token(user_id: str) -> str:
-    payload = f"{user_id}.{int(time.time()) + COOKIE_TTL}"
+def _make_token(user_id: str, token_version: int = 0) -> str:
+    payload = f"{user_id}.{token_version}.{int(time.time()) + COOKIE_TTL}"
     return f"{payload}.{_sign(payload)}"
 
 
 def _read_token(token: str) -> Optional[sqlite3.Row]:
     try:
-        user_id, exp, sig = token.rsplit(".", 2)
-        if not hmac.compare_digest(_sign(f"{user_id}.{exp}"), sig):
+        user_id, ver, exp, sig = token.rsplit(".", 3)
+        if not hmac.compare_digest(_sign(f"{user_id}.{ver}.{exp}"), sig):
             return None
         if int(exp) < time.time():
             return None
     except Exception:
         return None
-    return _q("SELECT * FROM console_users WHERE id = ?", (user_id,))
+    row = _q("SELECT * FROM console_users WHERE id = ?", (user_id,))
+    if row and int(row["token_version"] or 0) != int(ver):
+        return None  # 改密后旧会话全部失效
+    return row
+
+
+def _safe_media_url(url: str) -> bool:
+    """只放行 http(s) 绝对地址与本站 /uploads/ 相对路径，挡住 javascript:/data: 等。"""
+    u = (url or "").strip()
+    if not u:
+        return False
+    low = u.lower()
+    if low.startswith(("javascript:", "data:", "vbscript:", "file:")):
+        return False
+    if u.startswith("/uploads/"):
+        return ".." not in u and "\\" not in u
+    from urllib.parse import urlparse
+    parsed = urlparse(u)
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
 def _user_public(row: sqlite3.Row) -> dict:
@@ -242,7 +276,9 @@ def _user_public(row: sqlite3.Row) -> dict:
 def _bearer_ok(authorization: Optional[str]) -> bool:
     key = _STATE["api_key"]
     if not key:
-        return bool(_STATE["allow_no_auth"])
+        # 无 API_KEY 时绝不把「无 Bearer」当成 admin：工作台只认 cookie 登录。
+        # ALLOW_NO_AUTH 只影响既有 webhook 接口，不放大到工作台。
+        return False
     if not authorization or not authorization.startswith("Bearer "):
         return False
     return hmac.compare_digest(authorization[7:].strip(), key)
@@ -275,9 +311,32 @@ def need(min_role: str):
     def dep(user: dict = Depends(current_user)) -> dict:
         if ROLE_RANK.get(user["role"], 0) < ROLE_RANK[min_role]:
             raise HTTPException(403, f"需要 {ROLE_LABEL[min_role]} 及以上权限")
+        if user.get("must_change") and ROLE_RANK[min_role] >= ROLE_RANK["operator"]:
+            raise HTTPException(403, "初始密码未修改，请先修改密码后再执行写操作")
         return user
 
     return dep
+
+
+def _set_session_cookie(request: Request, response: Response, user_id: str, token_version: int) -> None:
+    """统一签发会话 Cookie。secure 默认按实际协议判断（兼容反代 X-Forwarded-Proto）。"""
+    forced = os.getenv("WEBHOOK_CONSOLE_SECURE_COOKIE", "auto")
+    if forced == "1":
+        secure = True
+    elif forced == "0":
+        secure = False
+    else:
+        proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
+        secure = proto == "https"
+    response.set_cookie(
+        COOKIE_NAME,
+        _make_token(user_id, int(token_version or 0)),
+        max_age=COOKIE_TTL,
+        httponly=True,
+        samesite="lax",
+        secure=secure,
+        path="/",
+    )
 
 
 # ─── 设置读写 ───────────────────────────────────────────────────────────────
@@ -652,7 +711,7 @@ router = APIRouter(prefix="/api/console", tags=["console"])
 
 
 @router.post("/login")
-def login(body: LoginIn, response: Response) -> dict:
+def login(request: Request, body: LoginIn, response: Response) -> dict:
     username = body.username.strip()
     now = time.time()
     fails = [t for t in _login_fails.get(username, []) if now - t < 300]
@@ -668,21 +727,21 @@ def login(body: LoginIn, response: Response) -> dict:
 
     _login_fails.pop(username, None)
     _exec("UPDATE console_users SET last_login = ? WHERE id = ?", (now, row["id"]))
-    response.set_cookie(
-        COOKIE_NAME,
-        _make_token(row["id"]),
-        max_age=COOKIE_TTL,
-        httponly=True,
-        samesite="lax",
-        secure=os.getenv("WEBHOOK_CONSOLE_SECURE_COOKIE", "") == "1",
-        path="/",
-    )
+    _set_session_cookie(request, response, row["id"], row["token_version"])
     fresh = _q("SELECT * FROM console_users WHERE id = ?", (row["id"],))
     return {"ok": True, "user": _user_public(fresh)}
 
 
 @router.post("/logout")
-def logout(response: Response) -> dict:
+def logout(request: Request, response: Response, authorization: Optional[str] = Header(None)) -> dict:
+    # Cookie 登录的会话：递增 token_version 使已签发的 token 立即失效（真正吊销）
+    tok = request.cookies.get(COOKIE_NAME)
+    if tok and not _bearer_ok(authorization):
+        try:
+            user_id = tok.rsplit(".", 3)[0]
+            _exec("UPDATE console_users SET token_version = token_version + 1 WHERE id = ?", (user_id,))
+        except Exception:
+            pass
     response.delete_cookie(COOKIE_NAME, path="/")
     return {"ok": True}
 
@@ -698,7 +757,7 @@ def me(user: dict = Depends(current_user)) -> dict:
 
 
 @router.post("/password")
-def change_password(body: PasswordIn, user: dict = Depends(current_user)) -> dict:
+def change_password(request: Request, body: PasswordIn, response: Response, user: dict = Depends(current_user)) -> dict:
     if user["id"] == "token":
         raise HTTPException(400, "服务令牌不通过此接口改密码")
     if len(body.new) < 8:
@@ -711,9 +770,14 @@ def change_password(body: PasswordIn, user: dict = Depends(current_user)) -> dic
         if not _verify_pw(body.old, row["password_hash"]):
             raise HTTPException(401, "原密码不正确")
     _exec(
-        "UPDATE console_users SET password_hash = ?, must_change = 0 WHERE id = ?",
+        "UPDATE console_users SET password_hash = ?, must_change = 0, "
+        "token_version = token_version + 1 WHERE id = ?",
         (_hash_pw(body.new), user["id"]),
     )
+    # 就地重签当前会话（版本号 +1），其余设备旧 token 全部失效，当前不掉线
+    fresh = _q("SELECT * FROM console_users WHERE id = ?", (user["id"],))
+    if fresh and user.get("via") == "cookie":
+        _set_session_cookie(request, response, fresh["id"], fresh["token_version"])
     return {"ok": True}
 
 
@@ -835,7 +899,7 @@ def delete_avatar(name: str, user: dict = Depends(need("operator"))) -> dict:
 
 
 @router.get("/avatar/{name}")
-def get_avatar(name: str):
+def get_avatar(name: str, user: dict = Depends(current_user)):
     row = _q("SELECT avatar FROM console_agents WHERE name = ?", (name,))
     if not row or not row["avatar"]:
         raise HTTPException(404, "没有自定义形象")
@@ -929,6 +993,8 @@ def send(body: SendIn, user: dict = Depends(need("operator"))) -> dict:
     name = body.name.strip()
     if not name:
         raise HTTPException(400, "缺少接收方信箱")
+    if body.media_url and not _safe_media_url(body.media_url):
+        raise HTTPException(400, "media_url 只允许 http(s) 或本站 /uploads/ 路径")
 
     mid = str(uuid.uuid4())
     now = time.time()
@@ -1037,25 +1103,33 @@ async def stream(
     since: Optional[float] = Query(None),
     user: dict = Depends(current_user),
 ) -> StreamingResponse:
-    """SSE：新消息增量推送 + 心跳。前端据此实现链路与通信台的实时刷新。"""
-    cursor = since if since is not None else time.time()
+    """SSE：新消息增量推送 + 心跳。前端据此实现链路与通信台的实时刷新。
+
+    游标用 (timestamp, id) 复合，避免同一秒内多条消息被 `timestamp > cursor` 漏掉。
+    前端只传 since（秒级时间戳），初始 cursor_id 取一个极大哨兵值，使首帧语义
+    仍是严格的 "timestamp > since"；之后游标推进到最后一条的 (ts, id)。
+    """
+    cursor_ts = since if since is not None else time.time()
+    cursor_id = "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"  # 初始：只取严格大于 since 的
 
     async def event_gen():
-        nonlocal cursor
+        nonlocal cursor_ts, cursor_id
         idle = 0
         while True:
             if await request.is_disconnected():
                 break
             rows = _q_all(
-                """SELECT * FROM messages WHERE timestamp > ?
-                   ORDER BY timestamp ASC LIMIT 200""",
-                (cursor,),
+                """SELECT * FROM messages
+                   WHERE timestamp > ? OR (timestamp = ? AND id > ?)
+                   ORDER BY timestamp ASC, id ASC LIMIT 200""",
+                (cursor_ts, cursor_ts, cursor_id),
             )
             if rows:
                 idle = 0
                 items = []
                 for row in rows:
-                    cursor = max(cursor, row["timestamp"])
+                    cursor_ts = row["timestamp"]
+                    cursor_id = row["id"]
                     meta = _meta(row["metadata"])
                     items.append({
                         "id": row["id"],
@@ -1072,7 +1146,7 @@ async def stream(
             else:
                 idle += 1
                 if idle % 5 == 0:
-                    yield f"event: tick\ndata: {json.dumps({'ts': time.time(), 'cursor': cursor})}\n\n"
+                    yield f"event: tick\ndata: {json.dumps({'ts': time.time(), 'cursor': cursor_ts})}\n\n"
                 else:
                     yield ": ping\n\n"
             await asyncio.sleep(2)

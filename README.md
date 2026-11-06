@@ -77,7 +77,7 @@ docker compose up -d
 
 ### 登录与角色
 
-首次启动自动创建 `admin` 账号，**密码等于 `WEBHOOK_API_KEY`**，登录后强制要求设置新密码。密码用 PBKDF2-SHA256 加盐存储，会话是签名过的 HttpOnly Cookie（7 天）。
+首次启动自动创建 `admin` 账号：设置了 `WEBHOOK_API_KEY` 时初始密码等于该 Key；**未设置 Key 时生成随机密码并在启动日志打印一次**（不再是弱口令 `admin`）。首次登录后强制要求设置新密码，且**服务端**在改密前拒绝所有 operator/admin 级写操作（不只在前端拦）。密码用 PBKDF2-SHA256 加盐存储，会话是签名过的 HttpOnly Cookie（7 天，带 SameSite=Lax）。
 
 | 角色 | 权限 |
 |------|------|
@@ -86,6 +86,8 @@ docker compose up -d
 | viewer | 只读 |
 
 工作台接口同时接受 Cookie 与 `Authorization: Bearer <API_KEY>`（后者视为 admin），原有 API 客户端行为不变。
+**`WEBHOOK_ALLOW_NO_AUTH=1` 不会放开工作台**：无 API Key 时工作台只认 Cookie 登录，绝不把匿名请求当成 admin。
+改密码或登出会递增账号的 token 版本，使此前签发的所有旧会话立即失效（当前会话自动重签，不掉线）。
 
 ### 五个页面
 
@@ -115,7 +117,15 @@ docker compose up -d
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| WEBHOOK_CONSOLE_SECURE_COOKIE | 关闭 | 设为 1 时 Cookie 带 `Secure`（HTTPS 部署时开启） |
+| WEBHOOK_CONSOLE_SECURE_COOKIE | auto | `auto`=按实际协议/X-Forwarded-Proto 自动判断；`1` 强制 Secure；`0` 强制关闭（仅本地 HTTP） |
+
+### 安全说明
+
+- 无 `WEBHOOK_API_KEY` 时工作台不因 `WEBHOOK_ALLOW_NO_AUTH` 变成匿名 admin，初始管理员密码随机生成并只打印一次。
+- 会话 token 带账号版本号：改密 / 登出后旧 token 立即失效。
+- `/api/console/send` 的 `media_url` 只允许 http(s) 绝对地址或本站 `/uploads/` 路径；前端渲染再做一层协议白名单，杜绝 `javascript:`/`data:` 注入。
+- 头像读取、除 login/logout 外的所有工作台接口均需登录。
+- SSE 实时流使用 `(timestamp, id)` 复合游标，同一秒内的多条消息不会漏。
 
 ### 响应式
 
