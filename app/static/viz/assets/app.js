@@ -252,8 +252,10 @@ async function boot() {
     $('app').hidden = false;
 
     const startRoute = parseHash() || 'overview';
-    if (!location.hash) history.replaceState(null, '', '#/overview');
-    render(startRoute === 'login' ? 'overview' : startRoute);
+    const route = startRoute === 'login' ? 'overview' : startRoute;
+    // 登录态下落在 #/login 要把地址栏纠正过来，否则刷新一次又回登录页
+    if (location.hash !== `#/${route}`) history.replaceState(null, '', `#/${route}`);
+    render(route);
 
     if (store.user.must_change && store.user.via !== 'bearer') {
       setTimeout(forcePasswordChange, 400);

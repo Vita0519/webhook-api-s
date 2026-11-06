@@ -381,8 +381,8 @@ function drawGraph(host, data, ctx) {
         const x2 = b.x + (leftSide ? NW : 0);
         const y1 = a.y + NH / 2;
         const y2 = b.y + NH / 2;
-        const c1 = [x1 + (leftSide ? 46 : -46), y1];
-        const c2 = [x2 + (leftSide ? 46 : -46), y2];
+        const c1 = [x1 + (leftSide ? 24 : -24), y1];
+        const c2 = [x2 + (leftSide ? 24 : -24), y2];
         d = `M${x1} ${y1} C${c1[0]} ${c1[1]} ${c2[0]} ${c2[1]} ${x2} ${y2}`;
         mid = [(x1 + 3 * c1[0] + 3 * c2[0] + x2) / 8, (y1 + 3 * c1[1] + 3 * c2[1] + y2) / 8];
       } else {
@@ -436,7 +436,8 @@ function drawGraph(host, data, ctx) {
       d="${d}" fill="none" stroke="${edgeColor(e)}" stroke-width="${width.toFixed(2)}"${dash}${markers}
       opacity="${e.inferred ? 0.85 : 1}"/>`);
 
-    if (e.count > 1) {
+    // 竖排时空间太窄，次数标签会压到信箱方块上，只在宽屏显示
+    if (e.count > 1 && !vertical) {
       parts.push(`<text x="${mid[0].toFixed(1)}" y="${mid[1].toFixed(1)}" text-anchor="middle"
         font-size="10" fill="#8f8f8b" stroke="#fff" stroke-width="3" paint-order="stroke"
         font-family="ui-monospace,Menlo,monospace">${e.count}${e.bidir ? ' ⇄' : ''}</text>`);
