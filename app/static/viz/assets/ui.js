@@ -111,13 +111,30 @@ export function initial(name) {
   return s.slice(0, 2).toUpperCase();
 }
 
-let toastTimer = 0;
+const TOAST_MS = 2600;
+const toastTimers = new WeakMap();
+
 export function toast(message, type = 'ok') {
   const wrap = document.getElementById('toast');
-  const node = el(`<div class="toast ${type === 'err' ? 'err' : ''}">${esc(message)}</div>`);
+  if (!wrap) return;
+
+  // 同一条提示已经在屏上：只续命，不再叠一层（否则会堆成一片且永不消失）
+  const same = [...wrap.querySelectorAll('.toast')].find((n) => n.dataset.msg === message);
+  if (same) {
+    clearTimeout(toastTimers.get(same));
+    toastTimers.set(same, setTimeout(() => same.remove(), TOAST_MS));
+    return;
+  }
+
+  const node = el(`<div class="toast ${type === 'err' ? 'err' : ''}"></div>`);
+  node.dataset.msg = message;
+  node.textContent = message;
   wrap.appendChild(node);
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => node.remove(), 2600);
+  toastTimers.set(node, setTimeout(() => node.remove(), TOAST_MS));
+
+  // 最多同时 3 条，超出的把最老的挤掉
+  const live = wrap.querySelectorAll('.toast');
+  if (live.length > 3) live[0].remove();
 }
 
 export function modal({ title, body = '', okText = '确定', cancelText = '取消', danger = false, onOk }) {

@@ -13,6 +13,8 @@ const S = {
   els: {},
   filter: '',
   loading: false,
+  exhausted: false,
+  gen: 0,
 };
 
 export async function mount(root, ctx) {
@@ -128,21 +130,33 @@ export async function mount(root, ctx) {
   };
 
   S.els.scroll.onscroll = async () => {
-    if (S.els.scroll.scrollTop > 30 || S.loading || !S.oldest || !S.selected) return;
+    if (S.exhausted || S.loading || !S.oldest || !S.selected) return;
+    if (S.els.scroll.scrollTop > 30) return;
+    const gen = S.gen;
+    const before = S.oldest;
     S.loading = true;
     try {
-      const data = await api.messages(S.selected, { limit: 40, before: S.oldest });
-      if (data.messages.length) {
+      const data = await api.messages(S.selected, { limit: 40, before });
+      // 请求期间切了会话 / 重新打开过：整包丢弃，否则会把上一页并进新列表造成重复气泡
+      if (gen !== S.gen) return;
+      const seen = new Set(S.msgs.map((m) => m.id));
+      const older = (data.messages || []).filter((m) => !seen.has(m.id));
+      if (older.length) {
         const height = S.els.scroll.scrollHeight;
-        S.msgs = [...data.messages, ...S.msgs];
+        S.msgs = [...older, ...S.msgs];
         S.oldest = S.msgs[0].timestamp;
         renderMessages(false);
         S.els.scroll.scrollTop = S.els.scroll.scrollHeight - height + 30;
       } else {
-        toast('没有更早的消息了');
+        // 到头了：只提示一次，改成贴在列表顶部，不再反复弹窗
+        S.exhausted = true;
+        if (!S.els.scroll.querySelector('.no-more-top')) {
+          S.els.scroll.insertAdjacentHTML('afterbegin',
+            '<div class="daysep no-more-top">没有更早的消息了</div>');
+        }
       }
     } catch (err) {
-      toast(err.message, 'err');
+      if (gen === S.gen) toast(err.message, 'err');
     } finally {
       S.loading = false;
     }
@@ -226,9 +240,15 @@ function renderThreads() {
 }
 
 async function open(name) {
+  const gen = ++S.gen;
   S.selected = name;
   S.unread.delete(name);
   S.pending = null;
+  // 立刻把上一条会话的列表和游标清掉：切换瞬间仍可能有一次滚动事件打进来
+  S.msgs = [];
+  S.oldest = null;
+  S.exhausted = false;
+  S.loading = false;
   S.els.attachChip.textContent = '';
   S.els.page.classList.add('thread-open');
   renderThreads();
@@ -250,12 +270,15 @@ async function open(name) {
 
   try {
     const data = await api.messages(name, { limit: 60 });
+    if (gen !== S.gen) return; // 期间切到别的会话了，这份结果作废
     S.msgs = data.messages || [];
     S.oldest = S.msgs[0]?.timestamp || null;
     renderMessages(true);
     renderSide(agent);
   } catch (err) {
-    S.els.scroll.innerHTML = `<div class="empty-state"><b>加载失败</b><span>${esc(err.message)}</span></div>`;
+    if (gen === S.gen) {
+      S.els.scroll.innerHTML = `<div class="empty-state"><b>加载失败</b><span>${esc(err.message)}</span></div>`;
+    }
   }
 }
 
