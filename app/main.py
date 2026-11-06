@@ -464,6 +464,17 @@ app = FastAPI(
     version="1.2.0",
 )
 
+# ─── 工作台：账号权限 / 信箱检测 / 链路推断 / 实时推送 ──────────────────────
+
+try:
+    from . import console as console_api
+except ImportError:  # 直接以脚本方式运行时
+    import console as console_api  # type: ignore[no-redef]
+
+console_api.configure(STORAGE_DIR, API_KEY, ALLOW_NO_AUTH)
+app.include_router(console_api.router)
+
+
 # ─── 静态页面：中继台 ───────────────────────────────────────────────────────
 
 VIZ_DIR = BASE_DIR / "static" / "viz"
