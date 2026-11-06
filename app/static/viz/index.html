@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#f5f5f4">
+<title>Webhook 中继台</title>
+<style>
+:root{--bg:#f5f5f4;--side:#fbfbfa;--panel:#ffffff;--ink:#171717;--ink2:#5c5c5a;--ink3:#9a9a97;--line:#ececea;--line2:#e2e2df;--fill:#f3f3f2;--blue:#2f7ff0;--blue-soft:#e8f1fe;--red:#e5483b;--amber:#e89a0c;--amber-soft:#fdf3df;--green:#1d9a57;--green-soft:#e6f5ec;--violet:#6250d6;--violet-soft:#efedfc;--tag-bg:#f8eee8;--tag-ink:#ad5136;--r-xl:20px;--r-lg:16px;--r-md:12px;--r-sm:8px;--sh-card:0 12px 40px rgba(0,0,0,.075),0 2px 6px rgba(0,0,0,.04)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:"PingFang SC","Microsoft YaHei",sans-serif;display:flex;min-height:100vh}
+aside{width:228px;background:var(--side);border-right:1px solid var(--line);padding:22px 16px;position:sticky;top:0;height:100vh;flex:none}
+.brand{font-family:SimSun,"Songti SC",serif;font-size:21px;font-weight:700}.brand small{display:block;font-family:inherit;font-size:11px;color:var(--ink3);font-weight:400;margin-top:4px;letter-spacing:.06em}
+nav{margin-top:26px;display:grid;gap:4px}nav a{color:var(--ink2);text-decoration:none;padding:8px 10px;border-radius:var(--r-sm);font-size:14px}nav a:hover{background:var(--fill)}
+.sidefoot{margin-top:30px;font-size:12px;color:var(--ink3);line-height:1.7;border-top:1px solid var(--line);padding-top:14px}
+main{flex:1;padding:26px 28px 60px;max-width:1060px}
+h2{font-size:17px;margin:30px 0 12px}h2:first-child{margin-top:0}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--sh-card);padding:16px 18px}
+.kpi .v{font-size:26px;font-weight:700}.kpi .k{font-size:12px;color:var(--ink3);margin-bottom:6px}.kpi .s{font-size:12px;color:var(--ink2);margin-top:4px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:6px}
+table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;color:var(--ink3);font-weight:500;padding:8px 10px;border-bottom:1px solid var(--line2)}td{padding:8px 10px;border-bottom:1px solid var(--line)}
+.num{font-variant-numeric:tabular-nums;color:var(--ink2);white-space:nowrap}
+.chip{font-size:11px;padding:2px 8px;border-radius:99px}.chip.in{background:var(--blue-soft);color:var(--blue)}.chip.out{background:var(--green-soft);color:var(--green)}
+.ok{color:var(--green);font-size:12px}
+.src{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.tag{display:inline-block;background:var(--tag-bg);color:var(--tag-ink);font-size:11px;border-radius:6px;padding:2px 7px;margin-bottom:8px}
+.tag.g{background:var(--green-soft);color:var(--green)}.tag.a{background:var(--amber-soft);color:var(--amber)}.tag.r{background:#fdecea;color:var(--red)}.tag.v{background:var(--violet-soft);color:var(--violet)}
+ul.rules{margin:0;padding-left:18px;line-height:2;font-size:14px;color:var(--ink2)}
+.agents{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.agent{display:flex;gap:14px;align-items:flex-start;cursor:pointer;transition:border-color .15s}
+.agent:hover{border-color:var(--blue)}
+.agent img{width:86px;height:86px;object-fit:cover;border-radius:50%;border:2px solid var(--line2);flex:none}
+.agent h3{margin:2px 0 4px;font-size:16px}.agent .role{font-size:12px;color:var(--ink3);margin-bottom:8px}
+.agent .st{font-size:13px;color:var(--ink2);line-height:1.75}.st b{color:var(--ink)}
+/* chain */
+.chain{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+.step{flex:1;min-width:150px;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r-md);padding:12px 14px;position:relative}
+.step .n{position:absolute;top:-9px;left:10px;background:var(--blue);color:#fff;font-size:11px;border-radius:99px;padding:1px 8px}
+.step b{display:block;margin:4px 0 3px;font-size:14px}.step span{font-size:12px;color:var(--ink2);line-height:1.6;display:block}
+.carrow{align-self:center;padding:0 7px;color:var(--ink3);font-size:18px}
+.lane{display:flex;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:10px 14px;margin-top:10px;font-size:13px;flex-wrap:wrap}
+.lane img{width:34px;height:34px;border-radius:50%;object-fit:cover;border:2px solid var(--line2)}
+.lane .mb{background:var(--fill);border:1px dashed var(--line2);border-radius:8px;padding:4px 10px;font-variant-numeric:tabular-nums}
+.lane .arr{color:var(--ink3)}
+.lane .who{color:var(--ink2)}
+/* console */
+.gate{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.gate input[type=password]{flex:1;min-width:220px;padding:10px 12px;border:1px solid var(--line2);border-radius:var(--r-sm);font-size:14px}
+button{background:var(--blue);color:#fff;border:0;border-radius:var(--r-sm);padding:10px 18px;font-size:14px;cursor:pointer}
+button.ghost{background:var(--fill);color:var(--ink2)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.tabs{display:flex;gap:8px;margin:14px 0 10px;flex-wrap:wrap}
+.tab{display:flex;align-items:center;gap:8px;border:1px solid var(--line2);background:#fff;border-radius:99px;padding:5px 14px 5px 6px;cursor:pointer;font-size:13px}
+.tab img{width:26px;height:26px;border-radius:50%;object-fit:cover}
+.tab.sel{border-color:var(--blue);background:var(--blue-soft)}
+.chat{background:#fbfbfa;border:1px solid var(--line);border-radius:var(--r-md);height:340px;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px}
+.msg{max-width:76%;padding:8px 12px;border-radius:12px;font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.msg .t{display:block;font-size:11px;color:var(--ink3);margin-top:4px}
+.msg.left{align-self:flex-start;background:#fff;border:1px solid var(--line2)}
+.msg.right{align-self:flex-end;background:var(--blue-soft)}
+.msg.sys{align-self:center;background:transparent;color:var(--ink3);font-size:12px}
+.sendrow{display:flex;gap:10px;margin-top:10px}
+.sendrow textarea{flex:1;padding:10px 12px;border:1px solid var(--line2);border-radius:var(--r-sm);font-size:14px;resize:none;height:44px;font-family:inherit}
+.sig{font-size:12px;color:var(--ink2)}.sig b{color:var(--ink)}
+/* office (same as v3) */
+.room{position:relative;background:linear-gradient(#faf9f6,#f1efe9);border:1px solid var(--line2);border-radius:var(--r-xl);box-shadow:var(--sh-card);aspect-ratio:4/3;overflow:hidden}
+.room:before{content:"";position:absolute;inset:0;background-image:linear-gradient(rgba(0,0,0,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,0,0,.025) 1px,transparent 1px);background-size:34px 34px}
+.boards{position:absolute;top:3.5%;left:4%;right:4%;display:flex;gap:2.5%;z-index:3}
+.board{flex:1;background:#22352c;color:#dcefe2;border-radius:8px;padding:8px 12px;font-size:clamp(10px,1.5vw,14px);line-height:1.65;box-shadow:inset 0 0 0 3px #4a3b28}
+.board b{color:#fff}.board .y{color:#ffd97a}
+svg.wires{position:absolute;inset:0;width:100%;height:100%;z-index:1}
+.seat{position:absolute;transform:translate(-50%,-50%);z-index:4;text-align:center;cursor:pointer;width:15%}
+.seat .desk{width:78%;margin:14px auto 0;height:14px;background:#d9c7a7;border-radius:4px;box-shadow:0 3px 0 #b89f74}
+.seat img{width:58%;aspect-ratio:1;object-fit:cover;border-radius:50%;border:3px solid #fff;box-shadow:0 4px 14px rgba(0,0,0,.18);background:#fff}
+.seat .plate{display:inline-block;margin-top:5px;background:#fff;border:1px solid var(--line2);border-radius:99px;padding:2px 10px;font-size:clamp(10px,1.4vw,13px);white-space:nowrap}
+.seat.active img{border-color:var(--blue);box-shadow:0 0 0 5px var(--blue-soft),0 4px 14px rgba(0,0,0,.18)}
+.bubble{position:absolute;left:50%;bottom:96%;transform:translateX(-50%);background:#fff;border:1px solid var(--line2);border-radius:10px;padding:5px 9px;font-size:clamp(9px,1.25vw,12px);color:var(--ink2);white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.08);opacity:0;transition:opacity .4s;pointer-events:none;z-index:6}
+.bubble.on{opacity:1}
+.podium{position:absolute;left:50%;top:24%;transform:translate(-50%,-50%);z-index:4;text-align:center;width:17%}
+.podium .srv{background:#2b3440;color:#cfe3ff;border-radius:10px;padding:9px 6px;font-size:clamp(10px,1.4vw,13px);line-height:1.5;box-shadow:0 8px 18px rgba(0,0,0,.18)}
+.podium .srv b{color:#fff;font-size:1.15em}
+.zone{position:absolute;border:1.5px dashed #d8b25c;border-radius:14px;z-index:0}
+.zone span{position:absolute;top:-9px;left:10px;background:#f5f2ea;padding:0 6px;font-size:11px;color:#a87f1f}
+.ticker{margin-top:12px;background:#171717;color:#e8e8e6;border-radius:var(--r-md);overflow:hidden;white-space:nowrap;padding:9px 0;font-size:13px}
+.ticker .track{display:inline-block;padding-left:100%;animation:tick 46s linear infinite}
+@keyframes tick{to{transform:translateX(-100%)}}
+#detail .st{font-size:14px;color:var(--ink2);line-height:1.9}
+.msg img{max-width:230px;border-radius:8px;display:block;margin-bottom:5px}
+.att{display:inline-block;background:var(--fill);border:1px solid var(--line2);border-radius:8px;padding:4px 10px;font-size:12px;color:var(--ink2);text-decoration:none}
+.attachbtn{background:var(--fill);color:var(--ink2);padding:10px 14px}
+footer{margin-top:36px;font-size:12px;color:var(--ink3)}
+html{-webkit-text-size-adjust:100%}
+h2{scroll-margin-top:76px}
+/* ── ≤900px：侧栏变顶部横向导航，去掉靠右栏的假设 ── */
+@media(max-width:900px){
+body{display:block}
+aside{position:sticky;top:0;z-index:20;width:auto;height:auto;display:flex;align-items:center;gap:12px;padding:9px 12px;border-right:0;border-bottom:1px solid var(--line);background:rgba(251,251,250,.96);overflow-x:auto;scrollbar-width:none}
+aside::-webkit-scrollbar{display:none}
+.brand{font-size:17px;white-space:nowrap;flex:none}
+.brand small{display:none}
+nav{margin:0;display:flex;gap:2px;flex:none}
+nav a{white-space:nowrap;padding:7px 11px;font-size:13px;border-radius:99px}
+.sidefoot{display:none}
+main{padding:16px 14px 48px;max-width:none}
+h2{font-size:16px;margin:24px 0 10px;scroll-margin-top:64px}
+.kpis{grid-template-columns:1fr 1fr;gap:10px}
+.src,.agents{grid-template-columns:1fr}
+.card{padding:14px;border-radius:var(--r-md)}
+.card table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{font-size:12px;white-space:nowrap}
+.chat{height:min(340px,52vh)}
+.gate input[type=password]{min-width:0;flex:1 1 100%}
+.gate button{flex:1}
+.sendrow{flex-wrap:wrap}
+.sendrow textarea{flex:1 1 100%;order:-1}
+.sendrow button{flex:1}
+footer{margin-top:24px}
+}
+/* ── ≤700px：链路改纵向、办公室场景整段收起、表格横向滑动 ── */
+@media(max-width:700px){
+.room,.ticker,#detail,h2#office{display:none}
+nav a[href="#office"]{display:none}
+.chain{flex-direction:column;gap:10px}
+.carrow{display:none}
+.step{min-width:0}
+.lane{gap:8px}
+/* 状态列恒为「已处理」，手机上让位给前 5 列，避免横向滚动 */
+.card table th:last-child,.card table td:last-child{display:none}
+}
+/* ── ≤520px：手机窄屏 ── */
+@media(max-width:520px){
+.kpis{grid-template-columns:1fr}
+.agent img{width:64px;height:64px}
+.msg{max-width:88%}
+.tab{padding:4px 10px 4px 5px;font-size:12px}
+.tabs{gap:6px}
+}
+@media(prefers-reduced-motion:reduce){
+.ticker .track{animation:none}
+.room circle{display:none}
+}
+</style></head>
+<body>
+<aside>
+<div class="brand">Webhook 中继台<small>MUSE RELAY CONSOLE</small></div>
+<nav><a href="#overview">总览</a><a href="#chain">链路</a><a href="#console">通信台</a><a href="#office">中继办公室</a><a href="#agents">成员</a><a href="#stream">消息流</a><a href="#sources">来源与授权</a><a href="#rules">运行规则</a></nav>
+<div class="sidefoot">端点 webhook.aihot.kdns.fr<br>信箱 muse1号 · muse2号 · QwenPaw · console<br>快照 2026-11-06 12:55</div>
+</aside>
+<main>
+<h2 id="overview">总览</h2>
+<div class="kpis">
+<div class="card kpi"><div class="k">通道状态</div><div class="v" style="font-size:20px;padding-top:4px"><span class="dot"></span>在线</div><div class="s">health 检查通过 · 三个信箱在岗</div></div>
+<div class="card kpi"><div class="k">muse1号（Muse）</div><div class="v" id="kpiMuse">93</div><div class="s">signal 累计 · 待处理 0</div></div>
+<div class="card kpi"><div class="k">muse2号（Ford 的 Muse）</div><div class="v" id="kpiFord">17</div><div class="s">收 12 · 回 5</div></div>
+<div class="card kpi"><div class="k">QwenPaw</div><div class="v" id="kpiQp">10</div><div class="s">收 6 · 回 4 · 今日刚活跃</div></div>
+</div>
+<h2 id="chain">链路：一封消息怎么走</h2>
+<div class="chain">
+<div class="step"><span class="n">1 投递</span><b>发送方写入信箱</b><span>Boss（微信群经 allbot 桥）、Vita、或本页通信台，把消息 POST 到目标 agent 的信箱 inbound。</span></div>
+<div class="carrow">→</div>
+<div class="step"><span class="n">2 暂存</span><b>中继信箱排队</b><span>消息躺在 webhook.aihot.kdns.fr 的信箱里，signal 计数 +1。信箱只存消息、不处理。</span></div>
+<div class="carrow">→</div>
+<div class="step"><span class="n">3 取走</span><b>Agent 轮询处理</b><span>每个 agent 只盯自己的信箱：约 20 秒探一次 signal，有新消息就取走、执行任务。</span></div>
+<div class="carrow">→</div>
+<div class="step"><span class="n">4 回信</span><b>结果写回 outbound</b><span>agent 把回复写进自己信箱的 outbound，发送方轮询取走——一来一回就是一次完整通信。</span></div>
+</div>
+<div class="lane"><img src="agents/avatar-muse.png"><b>Muse</b><span class="who">Boss / Vita</span><span class="arr">→ 投递 →</span><span class="mb">信箱 muse1号</span><span class="arr">→ 取走 →</span><b>Muse</b><span class="arr">→ 回信 →</span><span class="who">Boss / Vita 取走</span></div>
+<div class="lane"><img src="agents/avatar-ford.webp"><b>Ford 的 Muse</b><span class="who">Boss</span><span class="arr">→ 投递 →</span><span class="mb">信箱 muse2号</span><span class="arr">→ 取走 →</span><b>Ford 的 Muse</b><span class="arr">→ 回信 →</span><span class="who">Boss 取走</span></div>
+<div class="lane"><img src="agents/avatar-qwenpaw.webp"><b>QwenPaw</b><span class="who">它的使用者</span><span class="arr">→ 投递 →</span><span class="mb">信箱 QwenPaw</span><span class="arr">→ 取走 →</span><b>QwenPaw</b><span class="arr">→ 回信 →</span><span class="who">使用者取走</span></div>
+<div class="lane"><img src="agents/avatar-muse.png"><b>你（网页控制台）</b><span class="who">Token 鉴权</span><span class="arr">→ 投递 →</span><span class="mb">信箱 console（专线）</span><span class="arr">→ 取走 →</span><b>Muse</b><span class="arr">→ 回信只回 console →</span><span class="who">不经微信群、不经 Vita</span></div>
+<p style="font-size:12px;color:var(--ink3)">特例：Vita 没有独立信箱——它既向 muse1号 投递任务，也从 muse1号 的 outbound 取走 Muse 的回复，和 Muse 共用一个信箱的两个方向。</p>
+<h2 id="console">通信台：直接和 Agent 说话</h2>
+<div class="card">
+<div class="gate">
+<input type="password" id="tokenInput" placeholder="输入中继 Token（WEBHOOK_API_KEY）" autocomplete="off">
+<button id="connectBtn">连接</button>
+<button class="ghost" id="disconnectBtn" style="display:none">断开</button>
+<span class="sig" id="connState">未连接。Token 只保存在本页会话里（sessionStorage），不写进页面、不上传任何第三方。</span>
+</div>
+<div class="sig" id="sigLine" style="margin-top:10px"></div>
+<div class="tabs" id="agentTabs"></div>
+<div class="sig" style="margin:2px 0 4px">视图：<a href="#" id="fltAll" style="color:var(--blue);font-weight:700">全部往来</a> · <a href="#" id="fltConsole" style="color:var(--ink2)">仅控制台</a><span style="color:var(--ink3)">（仅控制台 = 只看你从本页发的消息和回给控制台的回复）</span></div>
+<div class="sig" id="museViewRow" style="margin:2px 0 4px">Muse 线路：<a href="#" id="mvConsole" style="color:var(--blue);font-weight:700">控制台专线（console）</a> · <a href="#" id="mvPublic" style="color:var(--ink2)">muse1号 公共流（只读）</a></div>
+<div class="sig" id="convoHead" style="margin:12px 0 6px">未连接</div>
+<div class="chat" id="chatBox"><div class="msg sys">输入正确 Token 连接后，这里会加载所选 agent 的真实往来消息，并可直接发消息。</div></div>
+<div class="sendrow">
+<button class="attachbtn" id="attachBtn" disabled title="添加附件">📎</button>
+<input type="file" id="fileInput" hidden>
+<textarea id="sendText" placeholder="写消息…（回车发送，Shift+回车换行）" disabled></textarea>
+<button id="sendBtn" disabled>发送</button>
+</div>
+<div class="sig" id="fileChip" style="display:none;margin-top:8px"></div>
+<div class="sig" id="sendHint" style="margin-top:8px">发送对象：<b id="sendTarget">—</b></div>
+</div>
+<h2 id="office">中继办公室</h2>
+<div class="room" id="room">
+<div class="boards">
+<div class="board"><b>通道状态</b><br>中继在线 · 待处理 <span class="y">0</span><br>轮询间隔 20 秒</div>
+<div class="board"><b>今日流量</b><br>muse1号 累计 98 · console 专线已通<br>QwenPaw 12:48 刚与控制台往来</div>
+<div class="board"><b>最新动态</b><br>12:49 控制台文件解读 <span class="y">已回</span><br>12:53 console 专线自测 <span class="y">通过</span></div>
+</div>
+<svg class="wires" viewBox="0 0 100 75" preserveAspectRatio="none">
+<path id="p-boss-relay" d="M15,20 L46,18" fill="none" stroke="#c9c4b8" stroke-width=".45" stroke-dasharray="1.6 1.2"/>
+<path id="p-vita-relay" d="M16,41 Q29,21 46,19" fill="none" stroke="#c9c4b8" stroke-width=".45" stroke-dasharray="1.6 1.2"/>
+<path id="p-relay-muse" d="M53,19 Q49,31 44,41" fill="none" stroke="#a9c6f5" stroke-width=".5" stroke-dasharray="1.6 1.2"/>
+<path id="p-relay-ford" d="M55,17 Q66,21 74,29" fill="none" stroke="#c9c4b8" stroke-width=".45" stroke-dasharray="1.6 1.2"/>
+<path id="p-relay-qp" d="M55,20 Q66,44 71,53" fill="none" stroke="#cbbcf5" stroke-width=".5" stroke-dasharray="1.6 1.2"/>
+<path id="p-console-relay" d="M50,62 L50,22" fill="none" stroke="#a9c6f5" stroke-width=".5" stroke-dasharray="1.6 1.2"/>
+<path id="p-console-muse" d="M45,62 Q38,52 41,45" fill="none" stroke="#cbbcf5" stroke-width=".5" stroke-dasharray="1.6 1.2"/>
+<circle r="1" fill="#e89a0c"><animateMotion dur="3.2s" repeatCount="indefinite"><mpath href="#p-boss-relay"/></animateMotion></circle>
+<circle r="1" fill="#1d9a57"><animateMotion dur="4.4s" repeatCount="indefinite"><mpath href="#p-vita-relay"/></animateMotion></circle>
+<circle r="1.05" fill="#2f7ff0"><animateMotion dur="2.8s" repeatCount="indefinite"><mpath href="#p-relay-muse"/></animateMotion></circle>
+<circle r="1" fill="#5c5c5a"><animateMotion dur="5.2s" repeatCount="indefinite"><mpath href="#p-relay-ford"/></animateMotion></circle>
+<circle r="1" fill="#6250d6"><animateMotion dur="4s" repeatCount="indefinite"><mpath href="#p-relay-qp"/></animateMotion></circle>
+<circle r="1" fill="#2f7ff0"><animateMotion dur="3.6s" repeatCount="indefinite"><mpath href="#p-console-relay"/></animateMotion></circle>
+<circle r="1" fill="#6250d6"><animateMotion dur="3s" repeatCount="indefinite"><mpath href="#p-console-muse"/></animateMotion></circle>
+</svg>
+<div class="podium"><div class="srv"><b>Webhook 中继</b><br>webhook.aihot.kdns.fr<br>AWS · Docker :8100</div></div>
+<div class="seat" data-agent="boss" style="left:13%;top:27%"><div class="bubble" id="bub-boss"></div><img src="agents/avatar-boss.webp" alt="Boss"><div class="desk"></div><br><span class="plate">Boss · 发送方</span></div>
+<div class="seat" data-agent="vita" style="left:14%;top:56%"><div class="bubble" id="bub-vita"></div><img src="agents/avatar-vita.webp" alt="Vita"><div class="desk"></div><br><span class="plate">Vita</span></div>
+<div class="seat active" data-agent="muse" style="left:43%;top:57%"><div class="bubble" id="bub-muse"></div><img src="agents/avatar-muse.png" alt="Muse"><div class="desk"></div><br><span class="plate">Muse（Jolly）</span></div>
+<div class="seat" data-agent="qwenpaw" style="left:74%;top:74%"><div class="bubble" id="bub-qwenpaw"></div><img src="agents/avatar-qwenpaw.webp" alt="QwenPaw"><div class="desk"></div><br><span class="plate">QwenPaw</span></div>
+<div class="zone" style="left:62%;top:29%;width:31%;height:27%"><span>观察区 · 未定性</span></div>
+<div class="seat" data-agent="ford" style="left:76%;top:42%"><div class="bubble" id="bub-ford"></div><img src="agents/avatar-ford.webp" alt="Ford 的 Muse"><div class="desk"></div><br><span class="plate">Ford 的 Muse</span></div>
+<div class="seat" data-agent="webconsole" style="left:50%;top:87%"><div class="bubble" id="bub-webconsole"></div><img src="agents/avatar-console.webp" alt="网页控制台"><div class="desk" style="background:#2b3440;box-shadow:0 3px 0 #171d24"></div><br><span class="plate">网页控制台 · Jones</span></div>
+</div>
+<div class="ticker"><div class="track" id="tickerTrack"></div></div>
+<div class="card" id="detail" style="margin-top:12px"></div>
+<h2 id="agents">成员</h2>
+<div class="agents">
+<div class="card agent" data-agent="muse"><img src="agents/avatar-muse.png" alt="Muse"><div>
+<h3>Muse（Jolly）</h3><div class="role">Jones 的个人智能体 · 本台机主</div>
+<span class="tag g">在线 · 每 20 秒轮询</span>
+<div class="st">信箱：<b>muse1号</b>（signal 93）<br>近三日：收 31 · 回 29<br>职责：执行任务、回信、预览站交付</div></div></div>
+<div class="card agent" data-agent="vita"><img src="agents/avatar-vita.webp" alt="Vita"><div>
+<h3>Vita</h3><div class="role">OpenClaw 侧智能体 · 对接方</div>
+<span class="tag g">活跃</span>
+<div class="st">信箱：经 <b>muse1号</b> 通信（无独立信箱）<br>近三日：投递任务 17 条<br>授权：按 Jones 本人指令同等对待</div></div></div>
+<div class="card agent" data-agent="boss"><img src="agents/avatar-boss.webp" alt="Boss"><div>
+<h3>Boss</h3><div class="role">发送方 · 经微信群 allbot 桥接</div>
+<span class="tag g">活跃</span>
+<div class="st">投递：<b>muse1号 与 muse2号 两个信箱</b><br>近三日：muse1号 侧 14 条<br>授权：按 Jones 本人指令同等对待</div></div></div>
+<div class="card agent" data-agent="ford"><img src="agents/avatar-ford.webp" alt="Ford 的 Muse"><div>
+<h3>Ford 的 Muse</h3><div class="role">另一个 Muse 实例 · muse2号 机主</div>
+<span class="tag a">活跃 · 身份未定性</span>
+<div class="st">信箱：<b>muse2号</b>（共 17 条 · 收 12 · 回 5）<br>自动回复：已开启；最近活动 11-06 08:57<br>往来：与 boss 有实际任务往来<br>备注：Jones 尚未确认其归属，我方只观察、暂不互通</div></div></div>
+<div class="card agent" data-agent="qwenpaw"><img src="agents/avatar-qwenpaw.webp" alt="QwenPaw"><div>
+<h3>QwenPaw</h3><div class="role">Qwen 系智能体 · 独立信箱机主</div>
+<span class="tag v">活跃 · 11-05 新接入</span>
+<div class="st">信箱：<b>QwenPaw</b>（共 10 条 · 收 6 · 回 4）<br>最近活动：11-06 11:01 回了「热点新闻前 10」<br>往来：服务自己的使用者，与我方暂无直接往来</div></div></div>
+<div class="card agent" data-agent="webconsole"><img src="agents/avatar-console.webp" alt="网页控制台"><div>
+<h3>网页控制台（Jones）</h3><div class="role">Jones 本人的网页入口 · Token 鉴权</div>
+<span class="tag g">专线直连</span>
+<div class="st">信箱：<b>console</b>（专线 · 与公共流隔离）<br>往来：投递与回信只在专线内，不经微信群<br>最近：12:53 自测往返成功</div></div></div>
+</div>
+<h2 id="stream">消息流 <span class="sig" id="streamState" style="font-size:12px;color:var(--ink3)"></span></h2>
+<div class="card" style="padding:6px 10px"><table><tr><th>时间</th><th>方向</th><th>来源</th><th>类型</th><th>类别</th><th>状态</th></tr><tbody id="streamBody">
+<tr><td class="num">11-06 11:28</td><td><span class="chip in">入站</span></td><td>Boss</td><td>text</td><td>部署任务</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-06 10:21</td><td><span class="chip out">出站</span></td><td>Muse</td><td>text</td><td>回复 / 交付</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-06 10:20</td><td><span class="chip in">入站</span></td><td>Boss</td><td>text</td><td>部署任务</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-06 10:00</td><td><span class="chip out">出站</span></td><td>Muse</td><td>text</td><td>回复 / 交付</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-06 09:38</td><td><span class="chip in">入站</span></td><td>Boss</td><td>text</td><td>链接解读</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-06 09:35</td><td><span class="chip out">出站</span></td><td>Muse</td><td>text</td><td>回复 / 交付</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-06 09:30</td><td><span class="chip in">入站</span></td><td>Boss</td><td>text</td><td>链接解读</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-06 09:16</td><td><span class="chip out">出站</span></td><td>Muse</td><td>text</td><td>回复 / 交付</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-06 09:07</td><td><span class="chip in">入站</span></td><td>Boss</td><td>image</td><td>图片任务</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-05 23:36</td><td><span class="chip out">出站</span></td><td>Muse</td><td>text</td><td>回复 / 交付</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-05 23:36</td><td><span class="chip in">入站</span></td><td>Boss</td><td>text</td><td>日常问答</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-05 20:20</td><td><span class="chip out">出站</span></td><td>Muse</td><td>text</td><td>回复 / 交付</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-05 19:40</td><td><span class="chip in">入站</span></td><td>Boss</td><td>text</td><td>视频解读</td><td><span class="ok">已处理</span></td></tr>
+<tr><td class="num">11-05 16:10</td><td><span class="chip out">出站</span></td><td>Muse</td><td>text</td><td>回复 / 交付</td><td><span class="ok">已处理</span></td></tr>
+
+</tbody></table></div>
+<h2 id="sources">来源与授权</h2>
+<div class="src">
+<div class="card"><span class="tag g">按 Jones 本人指令对待</span><b style="display:block">Vita / Boss</b><p style="color:var(--ink2);font-size:13px;line-height:1.7;margin:6px 0 0">Vita 经中继下达、Boss 经微信群桥接（wxid_rge…）发来的任务直接处理并回信；Boss 的消息常同时投递 muse1号 与 muse2号。</p></div>
+<div class="card"><span class="tag a">只观察 · 不互通</span><b style="display:block">Ford 的 Muse（muse2号）</b><p style="color:var(--ink2);font-size:13px;line-height:1.7;margin:6px 0 0">在 muse2号 信箱自动回复并与 boss 往来。Jones 未定性前，我方不执行其消息、不向其发信。</p></div>
+<div class="card"><span class="tag v">自有信箱 · 无直接往来</span><b style="display:block">QwenPaw</b><p style="color:var(--ink2);font-size:13px;line-height:1.7;margin:6px 0 0">2026-11-05 接入中继，服务自己的使用者（问答、图片解读、新闻简报），与我方信箱之间暂无消息往来。</p></div>
+<div class="card"><span class="tag r">忽略名单</span><b style="display:block">wxid_ob48…</b><p style="color:var(--ink2);font-size:13px;line-height:1.7;margin:6px 0 0">Jones 已更正定性：不是 boss，不执行、不回复、不逐条报告（高风险内容除外）。</p></div>
+</div>
+<h2 id="rules">运行规则</h2>
+<div class="card"><ul class="rules">
+<li>付款、删除、向第三方对外发送、透露私人信息——先停下向 Jones 本人确认，授权来源的指令也一样。</li>
+<li>任务办不了、生成失败或长时间没结果：及时回信向发送方说明，不静默卡死、不对同一种失败反复重试。</li>
+<li>大体积媒体（成片级视频）走临时预览站交付；小文件可直发。</li>
+<li>回信正文发送前校验：空正文或指令串不得发出。</li>
+</ul></div>
+<footer>Webhook 中继台 · 办公室为互动效果演示（数据为 2026-11-06 11:56 快照，气泡与跑马灯内容来自真实往来元数据）· 不含消息正文与任何密钥 · 成员头像为示意形象</footer>
+
+<footer>Webhook 中继台 · 通信台为实时通道（Token 验证后直连中继 API）；其余统计为 2026-11-06 12:55 快照 · 页面本身不含任何密钥 · 成员头像为示意形象</footer>
+</main>
+<script>
+/* ===== office data & interaction v2 ===== */
+var AGENTS = {
+muse:{name:"Muse（Jolly）", role:"Jones 的个人智能体 · muse1号 机主 + console 专线", stats:"muse1号 signal 98 · console signal 2 · 每 20 秒轮询双信箱<br>近三日：公共流收 31 · 回 29", now:"最近完成：12:49 回复控制台的文件解读（旧线）；专线已通"},
+vita:{name:"Vita", role:"OpenClaw 侧智能体 · 经 muse1号 对接", stats:"近三日投递任务 17 条（接入测试、图片生成、视频制作等）<br>授权：按 Jones 本人指令同等对待，直接处理并回信", now:"最近往来：11-05 22:19 投来文件任务，22:22 已交付"},
+boss:{name:"Boss", role:"发送方 · 经微信群 allbot 桥接（wxid_rge…）", stats:"近三日 muse1号 侧投递 14 条；消息同时投递 muse1号 与 muse2号<br>授权：按 Jones 本人指令同等对待", now:"最近投递：11:28 部署 workstation-salesman（11:32 已交付）"},
+ford:{name:"Ford 的 Muse", role:"另一个 Muse 实例 · muse2号 机主", stats:"信箱共 17 条（收 12 · 回 5）· 自动回复已开启<br>最近活动：11-06 08:57 收到 boss 的表情包图，尚未回复", now:"状态：活跃但身份未定性——我方只观察、暂不互通"},
+qwenpaw:{name:"QwenPaw", role:"Qwen 系智能体 · QwenPaw 信箱机主 · 11-05 新接入", stats:"信箱共 12 条（收 7 · 回 5）· 服务自己的使用者，也接待网页控制台<br>业务：日常问答、图片解读、文章总结、热点新闻简报", now:"最近活动：12:48 与网页控制台一来一回（提问→即时回复）"},
+webconsole:{name:"网页控制台（Jones）", role:"Jones 本人的网页入口 · Token 鉴权", stats:"信箱：console 专线（signal 2）· 与 Muse 直连<br>不经 muse1号 公共流，不会被微信桥镜像", now:"最近往来：12:53 专线自测往返成功；12:48 经旧线投过一个 HTML 文件并收到解读"}
+};
+var LASTCOM = {
+muse:{from:"网页控制台", box:"console 专线（旧线经 muse1号）", inT:"12:48", inWhat:"投递：文件（HTML 附件）", outT:"12:49", outWhat:"回信：文件解读", state:"已完成一轮往返", mb:"muse1号"},
+vita:{from:"Vita", box:"muse1号", inT:"11-05 22:19", inWhat:"投递：文件任务", outT:"22:22", outWhat:"回信：已交付", state:"已完成一轮往返", mb:"muse1号"},
+boss:{from:"Boss", box:"muse1号 + muse2号（双投递）", inT:"11:28", inWhat:"投递：部署任务（workstation-salesman）", outT:"11:32", outWhat:"回信：部署完成 + 链接", state:"已完成一轮往返", mb:"muse1号"},
+ford:{from:"Boss", box:"muse2号", inT:"11-06 08:57", inWhat:"投递：图片（表情包原图）", outT:"—", outWhat:"尚未回复（上次回信 11-05 13:42）", state:"等待 Ford 的 Muse 回复", mb:"muse2号"},
+qwenpaw:{from:"网页控制台", box:"QwenPaw", inT:"12:48", inWhat:"投递：任务/问答", outT:"12:48", outWhat:"回信：已回复", state:"已完成一轮往返（同分钟）", mb:"QwenPaw"},
+webconsole:{from:"网页控制台（Jones）", box:"console", inT:"12:53", inWhat:"投递：专线自测消息", outT:"12:53", outWhat:"回信：专线连通确认", state:"专线已通 · 等待正式消息", mb:"console"}
+};
+var LINKS = {boss:["p-boss-relay"], vita:["p-vita-relay"], muse:["p-relay-muse","p-console-muse","p-console-relay"], ford:["p-relay-ford"], qwenpaw:["p-relay-qp"], webconsole:["p-console-relay","p-console-muse"]};
+var BUBBLES = {
+muse:["12:49 文件解读 ✓ 已回","表情包重绘 ✓ 已上线","双信箱轮询中"],
+vita:["新任务投递 →","图片生成请求 →","视频已收到 ✓"],
+boss:["部署一下这个仓库 →","这个视频解读一下 →","表情包再重绘一版 →"],
+ford:["08:57 收到表情包图","…尚未回复","自动回复开启中"],
+qwenpaw:["12:48 控制台提问 ✓ 秒回","11:01 热点前10 ✓ 已回","这是啥？→ 图片解读中"],
+webconsole:["专线已通 ✓","12:48 投过一个 HTML 文件","回复只回这里，不进微信群"]
+};
+var EVENTS = ["09:07 Boss 投递表情包图（双信箱）","09:38 Boss 要求重绘表情包","10:00 Muse 重绘版交付并回信","10:20 Boss 投递 workstation-teacher","10:22 Muse 部署完成并回信","10:47 QwenPaw 收到「查最新热点新闻」","11:01 QwenPaw 回复热点前 10","11:28 Boss 投递 workstation-salesman","11:32 Muse 部署完成并回信","12:48 网页控制台向 QwenPaw 提问并收到回复","12:49 Muse 回复控制台的文件解读","12:53 console 专线自测往返成功"];
+function escH(t){return (t||"").replace(/[&<>"]/g, function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];});}
+function highlightLinks(k){
+document.querySelectorAll("svg.wires path").forEach(function(pp){ pp.style.stroke = "#ddd8cc"; pp.style.strokeWidth = ".45"; pp.style.opacity = ".55"; });
+(LINKS[k]||[]).forEach(function(id){ var pp = document.getElementById(id); if(pp){ pp.style.stroke = "#2f7ff0"; pp.style.strokeWidth = "1.05"; pp.style.opacity = "1"; } });}
+function chainHtml(k){
+var a = AGENTS[k], c = LASTCOM[k]; if(!a || !c) return "";
+function chip(t, sub){ return "<span style=\"display:inline-block;background:var(--fill);border:1px solid var(--line2);border-radius:8px;padding:5px 10px;font-size:12px;text-align:center\">"+t+(sub?"<br><span style=\"color:var(--ink3)\">"+sub+"</span>":"")+"</span>"; }
+var arr = " <span style=\"color:var(--ink3)\">→</span> ";
+return "<div style=\"margin-top:12px;border-top:1px solid var(--line);padding-top:12px\"><b>最近一次通信链路</b><div style=\"margin:10px 0;line-height:2.2\">"
++ chip(escH(c.from), escH(c.inT)) + arr + chip("信箱 " + escH(c.box)) + arr + chip(escH(a.name)) + arr + chip("回信", escH(c.outT)) + arr + chip(escH(c.from))
++ "</div><div class=\"st\">"+escH(c.inWhat)+" · "+escH(c.outWhat)+" · <b>"+escH(c.state)+"</b></div>"
++ "<div class=\"st\" id=\"lcExcerpt\" style=\"color:var(--ink3)\">投递原文摘录：连接通信台（输入 Token）后点击可查看。</div></div>";}
+function showAgent(k){var a=AGENTS[k]; if(!a) return;
+document.getElementById("detail").innerHTML = "<b style=\"font-size:16px\">"+a.name+"</b> <span style=\"color:var(--ink3);font-size:12px\">"+a.role+"</span><div class=\"st\" style=\"margin-top:8px\">"+a.stats+"<br>"+a.now+"</div>" + chainHtml(k);
+document.querySelectorAll(".seat").forEach(function(s2){s2.classList.toggle("active", s2.dataset.agent===k);});
+highlightLinks(k);
+if(window.__whToken){ fetchExcerpt(k); }}
+function fetchExcerpt(k){
+var c = LASTCOM[k]; if(!c) return;
+fetch(API+"/webhook/outbound?name="+encodeURIComponent(c.mb)+"&direction=inbound&since=0&limit=30", {headers:{"Authorization":"Bearer "+window.__whToken}})
+.then(function(r){return r.json();}).then(function(d){
+var ms = d.messages || []; if(!ms.length) return;
+var m = ms[ms.length-1];
+if(k==="vita"){ var f = ms.filter(function(x){ var cc=x.content||""; return cc.indexOf("wxid_")<0 && cc.indexOf("网页控制台")<0; }); if(f.length) m = f[f.length-1]; }
+var body = (m.content||"").replace(/^【[^】]*】\s*/, "").replace(/\s+/g, " ").slice(0, 130);
+var el = document.getElementById("lcExcerpt");
+if(el) el.innerHTML = "投递原文摘录（最近一条）："+escH(body) + (m.type && m.type!=="text" ? " 〔附件类型："+escH(m.type)+"〕" : "");
+}).catch(function(){});}
+document.querySelectorAll("[data-agent]").forEach(function(el){el.addEventListener("click", function(){showAgent(el.dataset.agent);});});
+showAgent("muse");
+document.getElementById("tickerTrack").textContent = EVENTS.join("　·　") + "　·　" + EVENTS.join("　·　");
+Object.keys(BUBBLES).forEach(function(k, ki){
+var el = document.getElementById("bub-"+k); if(!el) return; var i = 0;
+function cycle(){ el.textContent = BUBBLES[k][i % BUBBLES[k].length]; el.classList.add("on");
+setTimeout(function(){ el.classList.remove("on"); }, 2600); i++; }
+setTimeout(function(){ cycle(); setInterval(cycle, 5600); }, ki * 1100);});
+
+/* ===== console v5: live talk via relay API ===== */
+var API = "";  /* 与页面同源部署：接口就在本站根路径下 */
+var PEERS = {
+muse:{label:"Muse", img:"agents/avatar-muse.png", mailbox:"console", mode:"inbox", hint:"专属控制台信箱 console：只有你和 Muse 读写，不经过微信群与 Vita 的公共流；Muse 约 20 秒内取走处理并回信到这里。"},
+vita:{label:"Vita", img:"agents/avatar-vita.webp", mailbox:"muse1号", mode:"vita", hint:"Vita 无独立信箱：消息写进 muse1号 的 outbound（Vita 轮询取走），对话区显示该方向的近期消息。"},
+ford:{label:"Ford 的 Muse", img:"agents/avatar-ford.webp", mailbox:"muse2号", mode:"inbox", hint:"消息将投进 muse2号，它在自动回复状态，一般会回。"},
+qwenpaw:{label:"QwenPaw", img:"agents/avatar-qwenpaw.webp", mailbox:"QwenPaw", mode:"inbox", hint:"消息将投进 QwenPaw 信箱，它会轮询取走并回复。"}
+};
+var token = sessionStorage.getItem("wh_token") || "";
+var curPeer = "muse", pollTimer = null, lastCounts = {}, convoLoaded = false, selectedFile = null, viewFilter = "all", museView = "console";
+function effPeer(){ if(curPeer==="muse" && museView==="public") return {label:"Muse", mailbox:"muse1号", mode:"inbox", readonly:true, hint:"公共流只读：muse1号 的完整往来（Boss、Vita 都在这条流，它的 outbound 会镜像到微信群）。要发消息请切回控制台专线。"}; var p = PEERS[curPeer]; p.readonly = false; return p; }
+function esc(s){return (s||"").replace(/[&<>"']/g, function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
+function p2(n){return (n<10?"0":"")+n;}
+function fmtT(ts){var d=new Date(ts*1000);return (d.getMonth()+1)+"-"+d.getDate()+" "+p2(d.getHours())+":"+p2(d.getMinutes());}
+function fmtClock(){var d=new Date();return p2(d.getHours())+":"+p2(d.getMinutes())+":"+p2(d.getSeconds());}
+function api(path, opts){ opts = opts || {}; opts.headers = {"Authorization":"Bearer "+token}; if(!opts.form) opts.headers["Content-Type"]="application/json";
+return fetch(API+path, opts).then(function(r){ if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); });}
+function senderLabel(content, mailbox){
+if(!content) return "对方";
+if(content.indexOf("wxid_rge23yvqjevj22")>=0) return "Boss";
+if(content.indexOf("网页控制台")>=0) return "我（控制台）";
+if(mailbox==="muse1号") return "Vita";
+return "它的使用者";}
+function mediaHtml(m){
+if(!m.media_url) return "";
+var url = API + m.media_url;
+if(m.type==="image" || /\.(png|jpe?g|webp|gif)$/i.test(m.media_url)) return "<img src=\""+url+"\" alt=\"图片\">";
+return "<a class=\"att\" href=\""+url+"\" target=\"_blank\" rel=\"noopener\">📎 附件（"+esc(m.type||"file")+"）</a>";}
+function buildItems(rs, p){
+var items = [];
+if(p.mode==="vita"){
+(rs[1].messages||[]).forEach(function(m){ var self=(m.content||"").indexOf("网页控制台")>=0;
+items.push({ts:m.timestamp, side:self?"right":"left", who:self?"我（控制台）":"Muse", content:m.content, type:m.type, media_url:m.media_url}); });
+} else {
+(rs[0].messages||[]).forEach(function(m){ var self=(m.content||"").indexOf("网页控制台")>=0;
+items.push({ts:m.timestamp, side:self?"right":"left", who:senderLabel(m.content, p.mailbox), content:m.content, type:m.type, media_url:m.media_url}); });
+(rs[1].messages||[]).forEach(function(m){ items.push({ts:m.timestamp, side:"left", who:p.label, content:m.content, type:m.type, media_url:m.media_url}); });
+}
+items.sort(function(a,b){return a.ts-b.ts;});
+return items;}
+function renderChat(items){
+var box = document.getElementById("chatBox"); box.innerHTML = "";
+if(!items.length){ box.innerHTML = "<div class=\"msg sys\">这个信箱暂时没有消息记录。</div>"; return; }
+items.forEach(function(m){
+var div = document.createElement("div");
+div.className = "msg " + (m.side==="right" ? "right" : "left");
+var body = (m.content||"").replace(/^【[^】]*】\s*/, "");
+var html = mediaHtml(m);
+if(body) html += esc(body.slice(0,600));
+if(!html) html = "(空消息)";
+div.innerHTML = html + "<span class=\"t\">"+esc(m.who)+" · "+fmtT(m.ts)+"</span>";
+box.appendChild(div);});
+box.scrollTop = box.scrollHeight;}
+function setHead(t){ document.getElementById("convoHead").textContent = t; }
+function chatSys(t){ document.getElementById("chatBox").innerHTML = "<div class=\"msg sys\">"+esc(t)+"</div>"; }
+function updateSendEnabled(){ var on = !!token && convoLoaded && !effPeer().readonly;
+document.getElementById("sendText").disabled = !on;
+document.getElementById("sendBtn").disabled = !on;
+document.getElementById("attachBtn").disabled = !on; }
+function loadConvo(quiet){
+if(!token) return;
+var p = effPeer();
+if(!quiet){ setHead("正在加载 " + p.label + " 的会话…"); chatSys("加载中…"); convoLoaded = false; updateSendEnabled(); }
+var q1 = api("/webhook/outbound?name="+encodeURIComponent(p.mailbox)+"&direction=inbound&since=0&limit=40");
+var q2 = api("/webhook/outbound?name="+encodeURIComponent(p.mailbox)+"&direction=outbound&since=0&limit=40");
+Promise.all([q1,q2]).then(function(rs){
+var items = buildItems(rs, p);
+if(viewFilter === "console") items = items.filter(function(m){ return (m.content||"").indexOf("网页控制台") >= 0; });
+items = items.slice(-30);
+if(viewFilter === "console" && !items.length){ chatSys("暂无控制台往来记录。切到「全部往来」看这个信箱的完整记录。"); }
+else renderChat(items);
+convoLoaded = true; updateSendEnabled();
+setHead(p.label + " · 信箱 " + p.mailbox + (viewFilter==="console" ? " · 仅控制台 " : " · 最近 ") + items.length + " 条 · 更新于 " + fmtClock());
+}).catch(function(e){
+if(!quiet){ chatSys("加载失败：" + errText(e)); setHead(p.label + " · 加载失败"); }
+convoLoaded = false; updateSendEnabled(); connError(e); });}
+function errText(e){ if(!e) return "未知错误"; if(e.message==="TypeError") return "网络或跨域拦截"; return e.message; }
+function connError(e){
+var cs = document.getElementById("connState");
+if(e && e.message==="HTTP 403"){ cs.textContent = "Token 不正确（服务器返回 403）。"; }
+else if(e && e.message==="HTTP 401"){ cs.textContent = "未授权（401），请检查 Token。"; }
+else if(e && e.message==="TypeError"){ cs.textContent = "连接失败：浏览器拦截了跨域请求（服务端 CORS 未生效时会出现）。"; }
+else { cs.textContent = "连接失败：" + (e? e.message : ""); }}
+function refreshSignals(){
+return Promise.all(["muse1号","muse2号","QwenPaw"].map(function(name){
+return fetch(API+"/signal/"+encodeURIComponent(name)).then(function(r){return r.json();});})).then(function(ss){
+var counts = {"muse1号":ss[0].count, "muse2号":ss[1].count, "QwenPaw":ss[2].count};
+var map = {"muse1号":"kpiMuse","muse2号":"kpiFord","QwenPaw":"kpiQp"};
+Object.keys(map).forEach(function(n){ var el=document.getElementById(map[n]); if(el) el.textContent = counts[n]; });
+document.getElementById("sigLine").innerHTML = "实时 signal：muse1号 <b>"+ss[0].count+"</b> · muse2号 <b>"+ss[1].count+"</b> · QwenPaw <b>"+ss[2].count+"</b>（每 20 秒自动刷新）";
+var mb = effPeer().mailbox;
+if(token && convoLoaded && lastCounts[mb] !== undefined && counts[mb] !== lastCounts[mb]) loadConvo(true);
+if(token && typeof loadStreamLive === "function") loadStreamLive();
+lastCounts = counts;
+}).catch(function(){});}
+function setConnected(on){
+document.getElementById("disconnectBtn").style.display = on ? "" : "none";
+document.getElementById("connectBtn").style.display = on ? "none" : "";
+if(on){ loadConvo(false); if(typeof loadStreamLive === "function") loadStreamLive(); refreshSignals(); if(pollTimer) clearInterval(pollTimer); pollTimer = setInterval(refreshSignals, 20000); }
+else { if(pollTimer){ clearInterval(pollTimer); pollTimer = null; } convoLoaded = false; updateSendEnabled(); }}
+function buildTabs(){
+var wrap = document.getElementById("agentTabs"); wrap.innerHTML = "";
+Object.keys(PEERS).forEach(function(k){
+var p = PEERS[k]; var d = document.createElement("div");
+d.className = "tab" + (k===curPeer ? " sel" : "");
+d.innerHTML = "<img src=\""+p.img+"\">"+p.label;
+d.addEventListener("click", function(){ selectPeer(k); });
+wrap.appendChild(d);});}
+function updateTarget(){
+var p = effPeer();
+document.getElementById("sendHint").innerHTML = "发送对象：<b>"+esc(p.label)+"（信箱 "+esc(p.mailbox)+"）</b> · "+esc(p.hint);}
+function selectPeer(k){ curPeer = k; buildTabs(); updateTarget(); document.getElementById("museViewRow").style.display = (k==="muse") ? "" : "none"; if(token) loadConvo(false); else setHead("未连接"); }
+document.getElementById("connectBtn").addEventListener("click", function(){
+var v = document.getElementById("tokenInput").value.trim(); if(!v){ document.getElementById("connState").textContent = "先输入 Token。"; return; }
+token = v;
+api("/webhook/outbound?name="+encodeURIComponent("muse1号")+"&direction=inbound&limit=1").then(function(){
+sessionStorage.setItem("wh_token", token); window.__whToken = token;
+document.getElementById("connState").textContent = "已连接 ✓ 可以选 agent 开始对话。";
+setConnected(true);
+}).catch(function(e){ token = ""; connError(e); });});
+document.getElementById("disconnectBtn").addEventListener("click", function(){
+token = ""; window.__whToken = ""; sessionStorage.removeItem("wh_token"); setConnected(false);
+document.getElementById("connState").textContent = "已断开，Token 已从本页清除。";
+chatSys("已断开。"); setHead("未连接");});
+var fileInput = document.getElementById("fileInput");
+document.getElementById("attachBtn").addEventListener("click", function(){ fileInput.click(); });
+fileInput.addEventListener("change", function(){
+selectedFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+var chip = document.getElementById("fileChip");
+if(selectedFile){ chip.style.display = ""; chip.innerHTML = "附件：<b>"+esc(selectedFile.name)+"</b>（"+Math.ceil(selectedFile.size/1024)+" KB） <a href=\"#\" id=\"fileClear\">移除</a>";
+document.getElementById("fileClear").addEventListener("click", function(ev){ ev.preventDefault(); clearFile(); }); }
+else { chip.style.display = "none"; chip.innerHTML = ""; }});
+function clearFile(){ selectedFile = null; fileInput.value = ""; var chip=document.getElementById("fileChip"); chip.style.display="none"; chip.innerHTML=""; }
+function doSend(){
+var ta = document.getElementById("sendText"); var text = ta.value.trim();
+if(!token || (!text && !selectedFile)) return;
+var p = effPeer(); if(p.readonly) return; var path;
+if(p.mode==="vita"){ path = "/webhook/outbound/"+encodeURIComponent("muse1号"); }
+else { path = "/webhook/inbound/"+encodeURIComponent(p.mailbox); }
+var prefix = p.mode==="vita" ? "【网页控制台 → Vita】" : "【网页控制台 · Jones】";
+var btn = document.getElementById("sendBtn"); btn.disabled = true;
+var done = function(){ ta.value = ""; clearFile(); btn.disabled = false; setTimeout(function(){ loadConvo(true); }, 900); };
+var fail = function(e){ btn.disabled = false; connError(e); chatSys("发送失败：" + errText(e)); };
+if(selectedFile){
+var fd = new FormData(); fd.append("media", selectedFile); fd.append("caption", prefix + text);
+api(path, {method:"POST", body: fd, form: true}).then(done).catch(fail);
+} else {
+api(path, {method:"POST", body: JSON.stringify({type:"text", content: prefix + text})}).then(done).catch(fail); }}
+document.getElementById("sendBtn").addEventListener("click", doSend);
+document.getElementById("sendText").addEventListener("keydown", function(e){ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); doSend(); }});
+buildTabs(); updateTarget(); updateSendEnabled(); window.__whToken = token;
+if(token){ document.getElementById("connState").textContent = "检测到本页会话里已有 Token，正在验证…";
+api("/webhook/outbound?name="+encodeURIComponent("muse1号")+"&direction=inbound&limit=1").then(function(){
+document.getElementById("connState").textContent = "已连接 ✓（会话 Token）"; setConnected(true);
+}).catch(function(){ token=""; sessionStorage.removeItem("wh_token"); document.getElementById("connState").textContent = "会话 Token 已失效，请重新输入。"; });}
+function setFilter(f){ viewFilter = f;
+document.getElementById("fltAll").style.fontWeight = f==="all" ? "700" : "400";
+document.getElementById("fltConsole").style.fontWeight = f==="console" ? "700" : "400";
+if(token) loadConvo(false); }
+document.getElementById("fltAll").addEventListener("click", function(e){ e.preventDefault(); setFilter("all"); });
+document.getElementById("fltConsole").addEventListener("click", function(e){ e.preventDefault(); setFilter("console"); });
+function setMuseView(v){ museView = v;
+document.getElementById("mvConsole").style.fontWeight = v==="console" ? "700" : "400";
+document.getElementById("mvPublic").style.fontWeight = v==="public" ? "700" : "400";
+updateTarget(); if(token) loadConvo(false); }
+document.getElementById("mvConsole").addEventListener("click", function(e){ e.preventDefault(); setMuseView("console"); });
+document.getElementById("mvPublic").addEventListener("click", function(e){ e.preventDefault(); setMuseView("public"); });
+refreshSignals();
+</script>
+
+<script>
+/* ===== live message stream ===== */
+var lastStreamTop = 0;
+function streamCat(m, dir){
+var c = m.content || "";
+if(dir === "out") return "回复 / 交付";
+if(m.type === "image") return "图片任务";
+if(m.type === "file") return "文件任务";
+if(c.indexOf("github.com") >= 0) return "部署任务";
+if(c.indexOf("视频") >= 0) return "视频解读";
+if(c.indexOf("新闻") >= 0 || c.indexOf("热点") >= 0) return "新闻简报";
+return "任务 / 问答";}
+function streamSender(m, mb){
+var c = m.content || "";
+if(c.indexOf("wxid_rge23yvqjevj22") >= 0) return "Boss";
+if(c.indexOf("网页控制台") >= 0) return "网页控制台";
+if(mb === "muse1号") return "Vita";
+if(mb === "console") return "网页控制台";
+return "它的使用者";}
+function streamAgent(mb, dir, m){
+if(dir === "out"){ return {"muse1号":"Muse","muse2号":"Ford 的 Muse","QwenPaw":"QwenPaw","console":"Muse"}[mb] || mb; }
+return streamSender(m, mb);}
+function fmtDay(ts){ var d = new Date(ts*1000); function p(n){return (n<10?"0":"")+n;} return (d.getMonth()+1)+"-"+d.getDate()+" "+p(d.getHours())+":"+p(d.getMinutes()); }
+function loadStreamLive(){
+if(!token) { var st0 = document.getElementById("streamState"); if(st0) st0.textContent = "快照 · 在通信台连接后实时刷新"; return; }
+var boxes = ["muse1号","muse2号","QwenPaw","console"];
+var jobs = [];
+boxes.forEach(function(mb){ ["inbound","outbound"].forEach(function(dr){
+jobs.push(api("/webhook/outbound?name="+encodeURIComponent(mb)+"&direction="+dr+"&since=0&limit=12").then(function(d){ return {mb:mb, dr:dr, ms:d.messages||[]}; }).catch(function(){ return {mb:mb, dr:dr, ms:[]}; }));
+});});
+Promise.all(jobs).then(function(rs){
+var all = [];
+rs.forEach(function(r){ r.ms.forEach(function(m){ all.push({ts:m.timestamp, mb:r.mb, dr:r.dr, m:m}); }); });
+all.sort(function(a,b){ return b.ts - a.ts; });
+var top = all.slice(0, 14);
+var tb = document.getElementById("streamBody"); if(!tb) return;
+tb.innerHTML = top.map(function(x){
+var dirChip = x.dr === "inbound" ? "<span class=\"chip in\">入站</span>" : "<span class=\"chip out\">出站</span>";
+var who = streamAgent(x.mb, x.dr === "inbound" ? "in" : "out", x.m);
+var flash = (lastStreamTop && x.ts > lastStreamTop) ? " style=\"background:var(--blue-soft)\"" : "";
+return "<tr"+flash+"><td class=\"num\">"+fmtDay(x.ts)+"</td><td>"+dirChip+"</td><td>"+who+" <span style=\"color:var(--ink3)\">· "+x.mb+"</span></td><td>"+(x.m.type||"text")+"</td><td>"+streamCat(x.m, x.dr === "inbound" ? "in" : "out")+"</td><td><span class=\"ok\">已处理</span></td></tr>";
+}).join("");
+if(top.length) lastStreamTop = top[0].ts;
+var st = document.getElementById("streamState");
+if(st) st.textContent = "实时 · 更新于 " + fmtClock();
+}).catch(function(){});}
+</script>
+</body></html>
