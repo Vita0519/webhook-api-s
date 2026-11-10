@@ -943,6 +943,7 @@ def events(limit: int = Query(40, ge=1, le=200), user: dict = Depends(current_us
             "type": row["type"],
             "content": content[:140],
             "media_url": row["media_url"],
+            "request_id": row["request_id"],
             "timestamp": row["timestamp"],
         })
     return {"events": items, "count": len(items)}
