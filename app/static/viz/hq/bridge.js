@@ -94,6 +94,8 @@
       var n = (W.__WHQ_AGENTS__ || []).length;
       var sub = SR.getElementById("mSub");
       if (sub) sub.textContent = "中继实时数据 · " + n + " 个信箱";
+      var sub2 = SR.querySelector(".sub2");
+      if (sub2) sub2.textContent = "中继实时数据 · " + n + " 个信箱 · Webhook";
       var eb = SR.querySelector(".eb");
       if (eb) eb.innerHTML = 'WEBHOOK RELAY · <b>LIVE</b> · ' + n + " INBOXES · 24H";
     }
@@ -153,6 +155,8 @@
     if (SR) {
       var sub = SR.getElementById("mSub");
       if (sub) sub.textContent = "中继实时数据 · " + WS.length + " 条产线";
+      var sub2 = SR.querySelector(".sub2");
+      if (sub2) sub2.textContent = "中继实时数据 · " + WS.length + " 条产线 · Webhook";
       var eb = SR.querySelector(".eb");
       if (eb) eb.innerHTML = 'AGENT OPS · <b>LIVE</b> · ' + WS.length + " LINES · WEBHOOK";
     }
