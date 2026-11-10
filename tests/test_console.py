@@ -10,6 +10,7 @@
 - RBAC 分级
 """
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -178,3 +179,46 @@ def test_rbac_roles(cclient):
     assert v.get("/api/console/agents").status_code == 200
     assert v.post("/api/console/send", json={"name": "x", "content": "hi"}).status_code == 403
     assert v.get("/api/console/users").status_code == 403
+
+
+def test_events_expose_request_id_for_pairing(cclient):
+    """事件流要能参与链路配对：/events 与 /messages 一样给出 request_id。
+
+    外部消费方（自绘链路、第三方可视化外壳）通常先拉一批历史渲染首屏，
+    再接 SSE 增量。两批数据拼在一起时，只有 request_id 能把
+    inbound / outbound 认成同一次收发；缺了它首屏的边会少一半。
+    """
+    now = time.time()
+    conn = console._conn()
+    conn.execute("DELETE FROM messages WHERE id IN ('ev-out','ev-in','ev-norid')")  # 保证重复运行不累积
+    for mid, rid, name, direction, ts in (
+        ("ev-out", "rid-pair-1", "sender", "outbound", now),
+        ("ev-in", "rid-pair-1", "receiver", "inbound", now + 0.5),
+    ):
+        conn.execute(
+            "INSERT INTO messages (id, request_id, type, content, media_url, name, direction, timestamp, metadata) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (mid, rid, "text", "带 request_id 的一条", None, name, direction, ts, "{}"),
+        )
+    # 另一条没有 request_id 的消息，确认字段为 None 而不是被丢掉
+    conn.execute(
+        "INSERT INTO messages (id, request_id, type, content, media_url, name, direction, timestamp, metadata) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        ("ev-norid", None, "text", "没有 request_id", None, "sender", "outbound", now + 1, "{}"),
+    )
+    conn.commit()
+    conn.close()
+
+    events = cclient.get("/api/console/events?limit=50", headers=AUTH).json()["events"]
+    paired = [e for e in events if e.get("request_id") == "rid-pair-1"]
+    assert len(paired) == 2, events
+    assert {e["direction"] for e in paired} == {"inbound", "outbound"}
+    nob = next(e for e in events if e["id"] == "ev-norid")
+    assert nob["request_id"] is None
+
+    # 与 /messages 的字段保持一致，消费方不需要按接口写两套分支
+    msgs = cclient.get("/api/console/messages?name=sender&limit=5", headers=AUTH).json()["messages"]
+    mev = next(m for m in msgs if m["id"] == "ev-out")
+    assert mev["request_id"] == "rid-pair-1"
+    assert set(("id", "request_id", "name", "direction", "type", "content", "media_url", "timestamp")) <= set(mev)
+    assert set(("id", "request_id", "name", "direction", "type", "content", "media_url", "timestamp")) <= set(paired[0])
