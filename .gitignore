@@ -6,3 +6,6 @@ __pycache__/
 .venv/
 node_modules/
 .env
+
+# HQ 战术大屏原型（第三方主题，PolyForm 非商业许可，暂不随仓库分发）
+app/static/viz/hq/

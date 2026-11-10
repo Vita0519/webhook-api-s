@@ -53,7 +53,12 @@ export const ctx = {
 function buildNav() {
   $('nav').innerHTML = ROUTES.map(
     (r) => `<a href="#/${r.id}" data-route="${r.id}">${icon(r.icon)}<span>${esc(r.label)}</span></a>`,
-  ).join('');
+  ).join('') + `<a href="/viz/hq/" target="_blank" rel="noopener" class="ext" id="navHq" hidden>
+    ${icon('overview', 16)}<span>HQ 大屏</span></a>`;
+  // 战术大屏是独立主题包，未随仓库分发时自动隐藏入口
+  fetch('/viz/hq/index.html', { method: 'HEAD', credentials: 'same-origin' })
+    .then((r) => { if (r.ok) document.getElementById('navHq').hidden = false; })
+    .catch(() => {});
 }
 
 function markNav(route) {
