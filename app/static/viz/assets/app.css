@@ -45,6 +45,8 @@ nav.nav a svg{width:17px;height:17px;flex:none;stroke:currentColor;fill:none;str
 nav.nav a:hover{background:var(--fill);color:var(--ink)}
 nav.nav a.on{background:var(--blue-soft);color:var(--blue-deep);font-weight:600}
 nav.nav a.on svg{opacity:1}
+nav.nav a.ext{margin-top:6px;border-top:1px solid var(--line);padding-top:11px;border-radius:0;color:var(--ink3);font-size:13px}
+nav.nav a.ext:hover{background:transparent;color:var(--ink)}
 nav.nav .gap{height:1px;background:var(--line);margin:8px 6px}
 .side-user{border-top:1px solid var(--line);padding:12px 14px;display:flex;align-items:center;gap:10px}
 .side-user .av{width:30px;height:30px;border-radius:50%;background:var(--blue-soft);color:var(--blue-deep);display:grid;place-items:center;font-size:12px;font-weight:700;flex:none}

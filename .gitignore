@@ -6,3 +6,6 @@ __pycache__/
 .venv/
 node_modules/
 .env
+
+# 战术大屏的回滚副本（未精简的原版，仅本地保留）
+app/static/viz/hq/*.bak
