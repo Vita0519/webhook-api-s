@@ -4,6 +4,7 @@ import * as loginPage from './pages/login.js';
 import * as overviewPage from './pages/overview.js';
 import * as chatPage from './pages/chat.js';
 import * as officePage from './pages/office.js';
+import * as tacticalPage from './pages/tactical.js?v=20261110-v1';
 import * as agentsPage from './pages/agents.js';
 import * as settingsPage from './pages/settings.js';
 
@@ -11,6 +12,7 @@ const ROUTES = [
   { id: 'overview', label: '总览 · 链路', icon: 'overview', title: '总览与链路', sub: '一屏看清所有信箱与消息流向' },
   { id: 'chat', label: '通信台', icon: 'chat', title: '通信台', sub: '和任意信箱直接对话' },
   { id: 'office', label: '中继办公室', icon: 'office', title: '中继办公室', sub: '谁在活跃、谁静默、消息怎么走' },
+  { id: 'tactical', label: '战术大屏', icon: 'overview', title: 'HQ 战术大屏', sub: '内嵌 HQ 主题 · 与工作台共用正式实时数据' },
   { id: 'agents', label: '信箱与成员', icon: 'agents', title: '信箱与成员', sub: '自动检测的信箱与它们的形象' },
   { id: 'settings', label: '设置与权限', icon: 'settings', title: '设置与权限', sub: '基础设置、账号与角色' },
 ];
@@ -20,6 +22,7 @@ const MODULES = {
   overview: overviewPage,
   chat: chatPage,
   office: officePage,
+  tactical: tacticalPage,
   agents: agentsPage,
   settings: settingsPage,
 };
@@ -28,6 +31,16 @@ const $ = (id) => document.getElementById(id);
 let cleanup = null;
 let currentRoute = '';
 let booted = false;
+const THEMES = ['cyber', 'amber', 'ops'];
+
+function applyTheme(theme) {
+  const next = THEMES.includes(theme) ? theme : 'cyber';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('muse_viz_theme', next); } catch { /* ignore */ }
+  document.querySelectorAll('#themeSwitch button').forEach((btn) => {
+    btn.classList.toggle('on', btn.dataset.themeOpt === next);
+  });
+}
 
 export const ctx = {
   get user() { return store.user; },
@@ -53,12 +66,7 @@ export const ctx = {
 function buildNav() {
   $('nav').innerHTML = ROUTES.map(
     (r) => `<a href="#/${r.id}" data-route="${r.id}">${icon(r.icon)}<span>${esc(r.label)}</span></a>`,
-  ).join('') + `<a href="/viz/hq/" target="_blank" rel="noopener" class="ext" id="navHq" hidden>
-    ${icon('overview', 16)}<span>战术大屏</span></a>`;
-  // 主题包缺失时自动隐藏入口，避免留下一个 404 链接
-  fetch('/viz/hq/index.html', { method: 'HEAD', credentials: 'same-origin' })
-    .then((r) => { if (r.ok) document.getElementById('navHq').hidden = false; })
-    .catch(() => {});
+  ).join('');
 }
 
 function markNav(route) {
@@ -220,6 +228,13 @@ function forcePasswordChange() {
 
 /* ── 启动 ── */
 async function boot() {
+  let savedTheme = 'cyber';
+  try { savedTheme = localStorage.getItem('muse_viz_theme') || 'cyber'; } catch { /* ignore */ }
+  applyTheme(savedTheme);
+  $('themeSwitch')?.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-theme-opt]');
+    if (button) applyTheme(button.dataset.themeOpt);
+  });
   buildNav();
   $('menuBtn').innerHTML = icon('menu', 16);
   $('menuBtn').onclick = () => ($('sidebar').classList.contains('open') ? closeDrawer() : openDrawer());

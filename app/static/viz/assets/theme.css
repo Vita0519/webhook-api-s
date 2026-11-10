@@ -1,0 +1,32 @@
+/* Muse 工作台主题层：只覆盖视觉变量和通用控件，不改变上游业务逻辑。 */
+:root[data-theme="cyber"]{
+  color-scheme:dark;--bg:#07090e;--surface:#0c101a;--surface2:#111726;--fill:#161e31;
+  --line:rgba(90,190,255,.14);--line2:rgba(90,190,255,.26);--ink:#eef2f9;--ink2:#9fb0cc;--ink3:#637391;
+  --blue:#45e6f5;--blue-soft:rgba(69,230,245,.13);--blue-deep:#45e6f5;--green:#35e08a;--green-soft:rgba(53,224,138,.14);
+  --amber:#ffc21a;--amber-soft:rgba(255,194,26,.14);--red:#ff4d5e;--red-soft:rgba(255,77,94,.15);
+  --violet:#a78bfa;--violet-soft:rgba(167,139,250,.15);--sh:0 8px 28px rgba(0,0,0,.42);
+}
+:root[data-theme="amber"]{
+  color-scheme:dark;--bg:#0b0907;--surface:#120f0c;--surface2:#1a1510;--fill:#241d16;
+  --line:rgba(255,214,160,.13);--line2:rgba(255,214,160,.26);--ink:#f5ece0;--ink2:#bfa88e;--ink3:#7d6d5b;
+  --blue:#ffc46b;--blue-soft:rgba(255,196,107,.14);--blue-deep:#ffc46b;--green:#5fe3a1;--green-soft:rgba(95,227,161,.14);
+  --amber:#ff9a52;--amber-soft:rgba(255,154,82,.15);--red:#ff5a4f;--red-soft:rgba(255,90,79,.16);
+  --violet:#6fdcff;--violet-soft:rgba(111,220,255,.15);--sh:0 8px 28px rgba(0,0,0,.48);
+}
+:root[data-theme="ops"]{
+  color-scheme:light;--bg:#eeede8;--surface:#f8f7f3;--surface2:#f1f0eb;--fill:#e5e3dc;
+  --line:#d5d3cb;--line2:#bebcb2;--ink:#151515;--ink2:#4a4a45;--ink3:#7d7c75;
+  --blue:#1d4ed8;--blue-soft:#dbeafe;--blue-deep:#1e3a8a;--green:#15803d;--green-soft:#dcfce7;
+  --amber:#b45309;--amber-soft:#fef3c7;--red:#dc2626;--red-soft:#fee2e2;--violet:#6d28d9;
+  --violet-soft:#ede9fe;--sh:0 1px 3px rgba(21,21,21,.05),0 6px 18px rgba(21,21,21,.04);
+}
+body{background:var(--bg);color:var(--ink)}
+aside,.topbar,.thread-list,.chat-head,.chat-main,.card,.kpi,.feed,.rank,.side-user{background:var(--surface);border-color:var(--line)}
+nav.nav a{color:var(--ink2)}
+nav.nav a:hover,nav.nav a.on{background:var(--blue-soft);color:var(--blue-deep)}
+.topbar .sub,.muted,.thread .preview,.side-user .meta span{color:var(--ink3)}
+.theme-switch{display:flex;gap:3px;padding:3px;border:1px solid var(--line);border-radius:7px;background:var(--surface2)}
+.theme-switch button{border:0;border-radius:4px;background:transparent;color:var(--ink3);padding:4px 7px;font-size:11px;cursor:pointer}
+.theme-switch button:hover,.theme-switch button.on{background:var(--blue);color:#061018;font-weight:700}
+.pg-tactical{height:100%;min-height:0;overflow:hidden;background:#07080d}
+.tactical-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#07080d}

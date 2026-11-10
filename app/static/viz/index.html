@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="cyber">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -7,6 +7,7 @@
   <title>Webhook 工作台</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="assets/app.css">
+  <link rel="stylesheet" href="assets/theme.css?v=20261110-v1">
 </head>
 <body>
   <div id="boot" class="boot">
@@ -30,6 +31,11 @@
         <h1 id="pageTitle">总览</h1>
         <span class="sub" id="pageSub"></span>
         <span class="spacer"></span>
+        <div class="theme-switch" id="themeSwitch" title="切换主题">
+          <button type="button" data-theme-opt="cyber" class="on">赛博</button>
+          <button type="button" data-theme-opt="amber">黑金</button>
+          <button type="button" data-theme-opt="ops">工程</button>
+        </div>
         <span class="live" id="liveState"></span>
       </header>
       <main id="view"></main>
