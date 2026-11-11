@@ -46,10 +46,25 @@
     return;
   }
 
-  /* ---- 分组：同一个角色归一间房 / 一条产线 ---- */
-  var groups = {}, order = [];
+  /* ---- 分组：优先用人工标注的 role；没标注就按名字主干猜，避免全挤进一间房 ---- */
+  function guessGroup(a) {
+    var role = (a.role || "").trim();
+    if (role) return role;
+    var n = String(a.name || "").toLowerCase().trim();
+    if (!n) return "未分组";
+    var head = n.split("-").pop();                  // attach-probe → probe
+    head = head.replace(/[\s_]*\d+\s*号?$/, "");    // muse1号 / muse2 → muse
+    return head || n;
+  }
+  /* 英文主干首字母大写，中文原样 */
+  function groupLabel(g) {
+    return /^[a-z]/.test(g) ? g.charAt(0).toUpperCase() + g.slice(1) : g;
+  }
+
+  var groups = {}, order = [], unlabeled = 0;
   agents.forEach(function (a) {
-    var g = (a.role || "未分组").trim() || "未分组";
+    var g = guessGroup(a);
+    if (!(a.role || "").trim()) unlabeled++;
     if (!groups[g]) { groups[g] = []; order.push(g); }
     groups[g].push(a);
   });
@@ -59,6 +74,7 @@
     rest.forEach(function (g) { merged.push.apply(merged, groups[g]); delete groups[g]; });
     order = order.slice(0, 5).concat(["其它"]);
   }
+  W.__WHQ_UNLABELED__ = unlabeled;
 
   var groupOf = {};
   order.forEach(function (g, k) { groups[g].forEach(function (a) { groupOf[a.name] = k; }); });
@@ -69,7 +85,7 @@
     var g = order[i];
     if (!g) { DEPTS.push({ zh: "空闲工位", en: "IDLE", fn: "暂无该分组" }); continue; }
     DEPTS.push({
-      zh: cut(g, 6),
+      zh: cut(groupLabel(g), 6),
       en: "ROLE · " + groups[g].length,
       fn: groups[g].map(function (a) { return a.display_name || a.name; }).join(" · ")
     });
@@ -84,10 +100,11 @@
 
   W.__WHQ_ROSTER__ = agents.map(function (a) {
     var h = hash(a.name), d = groupOf[a.name] == null ? 0 : groupOf[a.name];
-    var st = a.status === "online" ? "在线" : (a.status === "idle" ? "静默" : "无消息");
+    // 后端 status 是 active / idle / silent；早期版本是 online，两个都认
+    var st = (a.status === "active" || a.status === "online") ? "在线" : (a.status === "idle" ? "静默" : "无消息");
     return [
       cut(a.display_name || a.name, 8),
-      cut(st + " · " + (a.role || "Agent"), 14),
+      cut(st + " · " + groupLabel((a.role || "").trim() || guessGroup(a)), 14),
       d, 1,
       heads[d] && heads[d].name === a.name ? 1 : 0,
       h % 5, pick(HAIRS, h >>> 3), pick(SHIRTS, h >>> 7), pick(SKINS, h >>> 11),
@@ -114,9 +131,9 @@
       return cut((m.content || "[" + (m.type || "消息") + "]").replace(/\s+/g, " "), 14);
     });
     HALLS.push({
-      zh: cut(gg, 6),
+      zh: cut(groupLabel(gg), 6),
       en: "ROLE · " + groups[gg].length,
-      ag: cut(gg, 4) + " Agent",
+      ag: cut(groupLabel(gg), 4) + " Agent",
       titles: msgs.length ? msgs : ["等待新消息"]
     });
   }
