@@ -61,8 +61,19 @@
     return /^[a-z]/.test(g) ? g.charAt(0).toUpperCase() + g.slice(1) : g;
   }
 
+  /* ---- 标记为「忽略」的信箱不进场景：停用的旧信箱、测试探针不该占房间 ---- */
+  var HIDDEN = ["忽略", "hidden", "ignore", "off"];
+  function isHidden(a) {
+    return HIDDEN.indexOf((a.role || "").trim().toLowerCase()) >= 0;
+  }
+  var hiddenAgents = agents.filter(isHidden);
+  var visible = agents.filter(function (a) { return !isHidden(a); });
+  if (!visible.length) visible = agents;   // 全被忽略时兜底，别把大屏清空
+  W.__WHQ_HIDDEN__ = hiddenAgents.length;
+  W.__WHQ_HIDDEN_NAMES__ = hiddenAgents.map(function (a) { return a.name; });
+
   var groups = {}, order = [], unlabeled = 0;
-  agents.forEach(function (a) {
+  visible.forEach(function (a) {
     var g = guessGroup(a);
     if (!(a.role || "").trim()) unlabeled++;
     if (!groups[g]) { groups[g] = []; order.push(g); }
@@ -93,12 +104,12 @@
   W.__WHQ_DEPTS__ = DEPTS;
 
   var heads = {};
-  agents.forEach(function (a) {
+  visible.forEach(function (a) {
     var d = groupOf[a.name];
     if (heads[d] == null || (a.total || 0) > (heads[d].total || 0)) heads[d] = a;
   });
 
-  W.__WHQ_ROSTER__ = agents.map(function (a) {
+  W.__WHQ_ROSTER__ = visible.map(function (a) {
     var h = hash(a.name), d = groupOf[a.name] == null ? 0 : groupOf[a.name];
     // 后端 status 是 active / idle / silent；早期版本是 online，两个都认
     var st = (a.status === "active" || a.status === "online") ? "在线" : (a.status === "idle" ? "静默" : "无消息");
@@ -111,7 +122,7 @@
       ["收 " + (a.inbound || 0), "发 " + (a.outbound || 0), a.name]
     ];
   });
-  W.__WHQ_AGENTS__ = agents;
+  W.__WHQ_AGENTS__ = visible;
   W.__WHQ_DEPT_OF__ = groupOf;
 
   /* ================= PARK：6 座车间 ================= */
