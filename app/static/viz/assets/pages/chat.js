@@ -209,7 +209,7 @@ function renderThreads() {
   host.innerHTML = list.map((a) => {
     const last = S.last.get(a.name);
     const preview = last
-      ? `${last.direction === 'inbound' ? '' : '我：'}${last.content || `[${last.type}]`}`
+      ? `${last.via === 'console' ? '我：' : ''}${last.content || `[${last.type}]`}`
       : '暂无消息';
     const unread = S.unread.get(a.name) || 0;
     const av = a.avatar || defaultAvatar(a.name);
@@ -314,13 +314,16 @@ function mediaHtml(m) {
 }
 
 function bubbleHtml(m) {
-  const inbound = m.direction === 'inbound';
-  const meta = `${fmtTime(m.timestamp)} · ${inbound ? '收' : '发'}${m.via === 'console' ? ' · 控制台' : ''}`;
+  // 「我发的」按 via 判断，不看 direction：控制台发出的消息在库里是 inbound
+  // （人发给信箱），历史上有一批写成了 outbound，两种都要能显示在右侧。
+  const mine = m.via === 'console';
+  const kind = mine ? '发' : (m.direction === 'inbound' ? '收' : '回');
+  const meta = `${fmtTime(m.timestamp)} · ${kind}${mine ? ' · 控制台' : ''}`;
   const text = m.content && m.type !== 'file' ? esc(m.content) : '';
   const inner = (text ? `<div class="text">${text}</div>` : '')
     + mediaHtml(m)
     + `<span class="meta">${meta}</span>`;
-  return `<div class="bubble ${inbound ? 'left' : 'right'}" data-id="${esc(m.id)}">${inner}</div>`;
+  return `<div class="bubble ${mine ? 'right' : 'left'}" data-id="${esc(m.id)}">${inner}</div>`;
 }
 
 function renderMessages(toBottom) {
@@ -385,7 +388,7 @@ async function sendMessage() {
     appendMessages([{
       id: res.id,
       name,
-      direction: 'outbound',
+      direction: 'inbound',   // 人发给信箱，与后端保持一致
       type: payload.type,
       content: payload.content,
       media_url: payload.media_url,

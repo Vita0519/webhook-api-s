@@ -521,6 +521,9 @@ def build_lineage(
     """
     ins: list[dict] = []
     outs: list[dict] = []
+    # 控制台发出的消息：语义上是 console → 该信箱。
+    # 新数据是 inbound（人发给信箱），早期数据是 outbound（当时写错了方向）。
+    console_ins: list[dict] = []
 
     for row in rows:
         name = row["name"]
@@ -536,7 +539,10 @@ def build_lineage(
             "via": (meta.get("via") or "").strip(),
         }
         if row["direction"] == "inbound":
-            ins.append(item)
+            if item["via"] == "console":
+                console_ins.append(item)      # 控制台发的，不当成「外部进来」
+            else:
+                ins.append(item)
         else:
             outs.append(item)
 
@@ -572,16 +578,27 @@ def build_lineage(
 
     handled_out: set[str] = set()
 
+    # 控制台发出去的：一条边 console → 信箱；同时记住 request_id，
+    # 这样信箱的回复能配回 console，而不是被当成「中继匿名转发」。
+    console_rid: dict[str, str] = {}
+    for c in console_ins:
+        add_edge("console", c["name"], 1.0, c["ts"], c["id"], "rid")
+        if c["rid"]:
+            console_rid[c["rid"]] = c["name"]
+
     # 规则一：request_id 精确配对（置信 1.0）
     for rid in set(by_rid_in) | set(by_rid_out):
         ilist = by_rid_in.get(rid, [])
         olist = by_rid_out.get(rid, [])
-        console_round = any(o["via"] == "console" for o in olist)
+        console_round = any(o["via"] == "console" for o in olist) or rid in console_rid
 
         for out in olist:
             handled_out.add(out["id"])
             if out["via"] == "console":
                 add_edge("console", out["name"], 1.0, out["ts"], out["id"], "rid")
+                continue
+            if rid in console_rid and out["name"] == console_rid[rid]:
+                add_edge(out["name"], "console", 1.0, out["ts"], out["id"], "rid")
                 continue
             if ilist:
                 before = [i for i in ilist if i["ts"] <= out["ts"] + 5]
@@ -1087,10 +1104,13 @@ def send(body: SendIn, user: dict = Depends(need("operator"))) -> dict:
 
     mid = str(uuid.uuid4())
     now = time.time()
+    # direction 用 inbound：这条是「人发给信箱的消息」，信箱侧的桥接/Agent 会当作
+    # 收到的消息处理。写成 outbound 会被误当成「该信箱要发出去的内容」——
+    # 实测会把控制台里发的话直接转发到微信群。
     _exec(
         """INSERT INTO messages (id, request_id, type, content, media_url, name,
                                  direction, timestamp, metadata)
-           VALUES (?, ?, ?, ?, ?, ?, 'outbound', ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, 'inbound', ?, ?)""",
         (
             mid,
             body.request_id or mid[:8],
