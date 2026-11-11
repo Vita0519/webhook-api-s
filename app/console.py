@@ -149,7 +149,9 @@ def _init_db() -> None:
                 note TEXT,
                 color TEXT,
                 avatar TEXT,
-                avatar_ts REAL
+                avatar_ts REAL,
+                deleted_at REAL,
+                pinned INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS console_settings (
                 k TEXT PRIMARY KEY,
@@ -165,6 +167,17 @@ def _init_db() -> None:
         _exec("ALTER TABLE console_users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+    # 旧库升级：信箱的「删除水位线」与「人工固定」
+    # deleted_at：手动删除信箱的时间点。消息时间晚于它才算「又有通信」，信箱才会重新出现。
+    # pinned：人工恢复/人工新建的标注，即使没有任何消息也保持可见。
+    for ddl in (
+        "ALTER TABLE console_agents ADD COLUMN deleted_at REAL",
+        "ALTER TABLE console_agents ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+    ):
+        try:
+            _exec(ddl)
+        except sqlite3.OperationalError:
+            pass
 
 
 def _bootstrap_admin() -> None:
@@ -388,8 +401,15 @@ def _status_of(last_ts: Optional[float], now: float) -> str:
     return "silent"
 
 
-def _collect_agents() -> tuple[list[dict], dict[str, dict]]:
-    """从 messages 动态发现信箱，叠加人工标注。不依赖任何手写名单。"""
+def _discover_agents() -> tuple[list[dict], dict[str, dict]]:
+    """从 messages 动态发现信箱，叠加人工标注。不依赖任何手写名单。
+
+    返回「全部」信箱，每项带 state（可见性）：
+      visible  正常显示
+      deleted  被手动删除，且删除后没有新通信 —— 仍在返回值里，供界面「恢复」用
+      empty    收和发都没有任何消息（空壳标注）—— 自动忽略
+    调用方自行按 state 过滤；_collect_agents 只给可见的那批。
+    """
     now = time.time()
     rows = _q_all(
         """
@@ -431,6 +451,17 @@ def _collect_agents() -> tuple[list[dict], dict[str, dict]]:
     agents = []
     for name, item in found.items():
         meta = ann.get(name, {})
+        deleted_at = meta.get("deleted_at")
+        state = "visible"
+
+        if deleted_at:
+            last_ts = item["last_ts"] or 0
+            if last_ts > deleted_at:
+                # 删除之后又有通信了：自动复活，水位线清掉
+                _exec("UPDATE console_agents SET deleted_at = NULL WHERE name = ?", (name,))
+            else:
+                state = "deleted"
+
         item["display_name"] = meta.get("display_name") or name
         item["role"] = meta.get("role") or ""
         item["note"] = meta.get("note") or ""
@@ -438,10 +469,22 @@ def _collect_agents() -> tuple[list[dict], dict[str, dict]]:
         item["avatar"] = _avatar_url(name, meta)
         item["has_custom_avatar"] = bool(meta.get("avatar"))
         item["status"] = _status_of(item["last_ts"], now)
+        item["pinned"] = bool(meta.get("pinned"))
+        item["deleted_at"] = None if state == "visible" and deleted_at else deleted_at
+        # 收和发都没有信息 → 自动忽略。人工固定（pinned）过的除外。
+        if state == "visible" and item["total"] == 0 and not item["pinned"]:
+            state = "empty"
+        item["state"] = state
         agents.append(item)
 
     agents.sort(key=lambda a: (-a["recent"], -a["total"], a["name"]))
     return agents, ann
+
+
+def _collect_agents() -> tuple[list[dict], dict[str, dict]]:
+    """只要可见信箱（KPI、通信台、大屏都用这个口径）。"""
+    agents, ann = _discover_agents()
+    return [a for a in agents if a["state"] == "visible"], ann
 
 
 # ─── 链路推断 ───────────────────────────────────────────────────────────────
@@ -822,15 +865,25 @@ def overview(window: str = "24h", user: dict = Depends(current_user)) -> dict:
 
 @router.get("/agents")
 def list_agents(user: dict = Depends(current_user)) -> dict:
-    agents, _ann = _collect_agents()
-    return {"agents": agents, "count": len(agents)}
+    everything, _ann = _discover_agents()
+    visible = [a for a in everything if a["state"] == "visible"]
+    hidden = [a for a in everything if a["state"] == "empty"]
+    deleted = [a for a in everything if a["state"] == "deleted"]
+    return {
+        "agents": visible,
+        "count": len(visible),
+        # 自动忽略（收和发都没有信息）与已删除的信箱单独返回，界面上可以恢复
+        "hidden": hidden,
+        "deleted": deleted,
+    }
 
 
 @router.patch("/agents/{name}")
 def patch_agent(name: str, body: AgentPatch, user: dict = Depends(need("admin"))) -> dict:
     exists = _q("SELECT 1 FROM console_agents WHERE name = ?", (name,))
     if not exists:
-        _exec("INSERT INTO console_agents (name) VALUES (?)", (name,))
+        # 人工新建的标注 = 人工认可它存在，pin 住，别被「空壳自动忽略」吃掉
+        _exec("INSERT INTO console_agents (name, pinned) VALUES (?, 1)", (name,))
     fields, values = [], []
     for key in ("display_name", "role", "note", "color"):
         value = getattr(body, key)
@@ -840,8 +893,43 @@ def patch_agent(name: str, body: AgentPatch, user: dict = Depends(need("admin"))
     if fields:
         values.append(name)
         _exec(f"UPDATE console_agents SET {', '.join(fields)} WHERE name = ?", tuple(values))
-    agents, _ann = _collect_agents()
-    return {"ok": True, "agent": next((a for a in agents if a["name"] == name), None)}
+    everything, _ann = _discover_agents()
+    return {"ok": True, "agent": next((a for a in everything if a["name"] == name), None)}
+
+
+@router.delete("/agents/{name}")
+def delete_agent(name: str, user: dict = Depends(need("admin"))) -> dict:
+    """手动删除信箱：只打一条删除水位线，消息与标注都保留。
+
+    删除后它从列表消失；等这个信箱再有通信（消息时间晚于水位线），
+    例如桥接又推来一条消息，它会自动重新出现。
+    """
+    exists = _q("SELECT 1 FROM console_agents WHERE name = ?", (name,))
+    if not exists:
+        _exec("INSERT INTO console_agents (name) VALUES (?)", (name,))
+    _exec(
+        "UPDATE console_agents SET deleted_at = ?, pinned = 0 WHERE name = ?",
+        (time.time(), name),
+    )
+    return {"ok": True, "deleted": name, "until_next_message": True}
+
+
+@router.post("/agents/{name}/restore")
+def restore_agent(name: str, user: dict = Depends(need("admin"))) -> dict:
+    """恢复信箱：清掉删除水位线并 pin 住。
+
+    pin 是为了让「本来就没有消息」的空壳信箱恢复后也留得住，
+    否则会被自动忽略规则立刻再收走。
+    """
+    exists = _q("SELECT 1 FROM console_agents WHERE name = ?", (name,))
+    if not exists:
+        _exec("INSERT INTO console_agents (name) VALUES (?)", (name,))
+    _exec(
+        "UPDATE console_agents SET deleted_at = NULL, pinned = 1 WHERE name = ?",
+        (name,),
+    )
+    everything, _ann = _discover_agents()
+    return {"ok": True, "agent": next((a for a in everything if a["name"] == name), None)}
 
 
 def _sniff_image(data: bytes) -> Optional[str]:
