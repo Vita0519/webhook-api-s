@@ -52,6 +52,8 @@ export const api = {
   overview: (window) => request(`/api/console/overview${qs({ window })}`),
   agents: () => request('/api/console/agents'),
   patchAgent: (name, body) => request(`/api/console/agents/${encodeURIComponent(name)}`, { method: 'PATCH', body }),
+  deleteAgent: (name) => request(`/api/console/agents/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  restoreAgent: (name) => request(`/api/console/agents/${encodeURIComponent(name)}/restore`, { method: 'POST' }),
   uploadAvatar: (name, file) => {
     const form = new FormData();
     form.append('file', file);
