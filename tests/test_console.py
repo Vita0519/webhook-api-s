@@ -222,3 +222,94 @@ def test_events_expose_request_id_for_pairing(cclient):
     assert mev["request_id"] == "rid-pair-1"
     assert set(("id", "request_id", "name", "direction", "type", "content", "media_url", "timestamp")) <= set(mev)
     assert set(("id", "request_id", "name", "direction", "type", "content", "media_url", "timestamp")) <= set(paired[0])
+
+
+def _seed_msg(mid: str, name: str, ts: float, direction: str = "inbound") -> None:
+    """往 messages 里塞一条记录，用来制造「这个信箱有通信」。"""
+    conn = console._conn()
+    conn.execute("DELETE FROM messages WHERE id = ?", (mid,))
+    conn.execute(
+        "INSERT INTO messages (id, request_id, type, content, media_url, name, direction, timestamp, metadata) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (mid, None, "text", "测试消息", None, name, direction, ts, "{}"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _as_admin(client):
+    """登录并把初始密码改掉（must_change=1 时写操作会被拦）。"""
+    _login(client)
+    client.post("/api/console/password", json={"old": "", "new": "newpass123"})
+
+
+def test_agent_delete_is_a_watermark_not_a_purge(cclient):
+    """手动删除信箱：只是记水位线。
+
+    删除后不再出现在列表里，但历史消息还在；等这个信箱又有新通信
+    （消息时间晚于水位线），它会自己回来 —— 这样不需要人工维护白名单，
+    也不会因为一次误删就永久丢掉一个活跃信箱。
+    """
+    _as_admin(cclient)
+    _seed_msg("del-old", "inbox-del", time.time() - 120)
+
+    names = lambda d: [a["name"] for a in d["agents"]]  # noqa: E731
+    before = cclient.get("/api/console/agents").json()
+    assert "inbox-del" in names(before)
+
+    assert cclient.delete("/api/console/agents/inbox-del").status_code == 200
+    after = cclient.get("/api/console/agents").json()
+    assert "inbox-del" not in names(after)
+    assert "inbox-del" in [a["name"] for a in after["deleted"]]
+
+    # 历史消息没有被删，删掉的只是列表可见性
+    msgs = cclient.get("/api/console/messages?name=inbox-del&limit=5").json()["messages"]
+    assert any(m["id"] == "del-old" for m in msgs)
+
+    # 删除后来了新消息 -> 自动复活
+    _seed_msg("del-new", "inbox-del", time.time() + 1)
+    revived = cclient.get("/api/console/agents").json()
+    assert "inbox-del" in names(revived)
+    assert "inbox-del" not in [a["name"] for a in revived["deleted"]]
+
+
+def test_empty_agent_auto_ignored_but_manual_create_pins(cclient):
+    """收和发都没有消息的空壳自动忽略；人工新建/恢复的则固定可见。
+
+    自动忽略只针对「一条消息都没有」的信箱，不做发起/应答方向的推断——
+    否则 boss 这类只推不收的合法发送方会被误判成僵尸信箱。
+    """
+    _as_admin(cclient)
+    names = lambda d: [a["name"] for a in d["agents"]]  # noqa: E731
+
+    # 人工新建标注 = 人工认可它存在，先 pin 住
+    assert cclient.patch("/api/console/agents/shell-x", json={"display_name": "空壳"}).status_code == 200
+    d = cclient.get("/api/console/agents").json()
+    assert "shell-x" in names(d)
+    assert not [a for a in d["hidden"] if a["name"] == "shell-x"]
+
+    # 去掉 pin（等价于「不是人工建的」）-> 进入自动忽略
+    conn = console._conn()
+    conn.execute("UPDATE console_agents SET pinned = 0 WHERE name = 'shell-x'")
+    conn.commit()
+    conn.close()
+    d = cclient.get("/api/console/agents").json()
+    assert "shell-x" not in names(d)
+    assert "shell-x" in [a["name"] for a in d["hidden"]]
+
+    # 手动恢复 -> 重新可见
+    assert cclient.post("/api/console/agents/shell-x/restore").status_code == 200
+    d = cclient.get("/api/console/agents").json()
+    assert "shell-x" in names(d)
+
+
+def test_agent_delete_requires_admin(cclient):
+    """删除/恢复是破坏性操作，viewer 不能碰。"""
+    _as_admin(cclient)
+    r = cclient.post("/api/console/users",
+                     json={"username": "v2", "password": "viewerpass", "role": "viewer"})
+    assert r.status_code == 200
+    v = TestClient(main.app)
+    assert v.post("/api/console/login", json={"username": "v2", "password": "viewerpass"}).status_code == 200
+    assert v.delete("/api/console/agents/whatever").status_code == 403
+    assert v.post("/api/console/agents/whatever/restore").status_code == 403
